@@ -1,0 +1,264 @@
+@font-face {
+  font-family: 'KannadaDocUnicode';
+  src: url('../fonts/unicode/NotoSansKannada-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'KannadaDocUnicode';
+  src: url('../fonts/unicode/NotoSansKannada-Bold.ttf') format('truetype');
+  font-weight: 700;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'Nudi 01 e';
+  src: url('../fonts/legacy/Nudi01e.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'BRH Kannada';
+  src: url('../fonts/legacy/BRHKannada.ttf') format('truetype');
+}
+
+:root {
+  --editor-font-size: 18pt;
+  --paper-max-width: 820px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background-color: #f3ead6;
+  color: #1d242b;
+  font-family: 'KannadaDocUnicode', 'Noto Sans Kannada', 'Tunga', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+#desk {
+  min-height: 100vh;
+  padding: 20px 16px 80px 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+#original-banner {
+  width: 100%;
+  max-width: var(--paper-max-width);
+  background: #f5e6c4;
+  color: #4f3609;
+  border: 1px solid #d4af63;
+  border-radius: 10px;
+  padding: 10px 16px;
+  margin-bottom: 12px;
+  font-size: 14pt;
+  font-weight: 600;
+  text-align: center;
+}
+
+.hidden {
+  display: none !important;
+}
+
+#paper {
+  width: 100%;
+  max-width: var(--paper-max-width);
+  min-height: 82vh;
+  background: #fffdf8;
+  border-radius: 10px;
+  box-shadow: 0 2px 12px rgba(26, 77, 122, 0.10);
+  padding: 40px 48px;
+  font-size: var(--editor-font-size);
+  line-height: 1.75;
+  outline: none;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  caret-color: #1a4d7a;
+}
+
+#paper.read-only-original {
+  background: #fdf8ec;
+  border: 2px dashed #c49b4d;
+}
+
+#paper:empty::before {
+  content: attr(data-placeholder);
+  color: #8b8779;
+  pointer-events: none;
+}
+
+#paper p {
+  margin: 0 0 0.7em 0;
+  min-height: 1.2em;
+}
+
+#paper h1 {
+  font-size: 1.55em;
+  line-height: 1.45;
+  margin: 0.4em 0 0.55em 0;
+  color: #133c61;
+}
+
+#paper h2 {
+  font-size: 1.3em;
+  line-height: 1.5;
+  margin: 0.4em 0 0.5em 0;
+  color: #1a4d7a;
+}
+
+#paper h3 {
+  font-size: 1.15em;
+  line-height: 1.55;
+  margin: 0.35em 0 0.45em 0;
+}
+
+#paper ul, #paper ol {
+  margin: 0.3em 0 0.8em 0;
+  padding-left: 1.6em;
+}
+
+#paper li {
+  margin-bottom: 0.35em;
+}
+
+#paper table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 14px 0 18px 0;
+  table-layout: auto;
+}
+
+#paper td, #paper th {
+  border: 1px solid #c9bea6;
+  padding: 8px 12px;
+  vertical-align: top;
+  min-width: 60px;
+}
+
+#paper tr:first-child td, #paper th {
+  background-color: #f3ead6;
+}
+
+/* Find & Replace match highlights */
+mark.kd-search-match {
+  background-color: #ffe082;
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 1px;
+}
+
+mark.kd-search-match.kd-search-active {
+  background-color: #d4891c;
+  color: #ffffff;
+  outline: 2px solid #9e620b;
+  border-radius: 3px;
+}
+
+/* Dark theme matching Kadata deep slate navy + heritage gold */
+body.dark-theme {
+  background-color: #101720;
+  color: #eae5d9;
+}
+
+body.dark-theme #desk {
+  background-color: #101720;
+}
+
+body.dark-theme #paper {
+  background-color: #18222e;
+  color: #ece8de;
+  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.45);
+  caret-color: #8abce6;
+}
+
+body.dark-theme #paper.read-only-original {
+  background-color: #212018;
+  border-color: #9e7b36;
+}
+
+body.dark-theme #paper:empty::before {
+  color: #7c8996;
+}
+
+body.dark-theme #paper h1 {
+  color: #9ec8eb;
+}
+
+body.dark-theme #paper h2 {
+  color: #e0b86a;
+}
+
+body.dark-theme #paper td,
+body.dark-theme #paper th {
+  border-color: #394a5c;
+}
+
+body.dark-theme #paper tr:first-child td,
+body.dark-theme #paper th {
+  background-color: #202d3b;
+}
+
+body.dark-theme #original-banner {
+  background: #332914;
+  color: #f7dfaa;
+  border-color: #7c5e23;
+}
+
+body.dark-theme mark.kd-search-match {
+  background-color: #e0b86a;
+  color: #101720;
+}
+
+body.dark-theme mark.kd-search-match.kd-search-active {
+  background-color: #4a90cc;
+  color: #ffffff;
+  outline: 2px solid #8abce6;
+}
+
+@media (max-width: 640px) {
+  #desk {
+    padding: 8px 6px 60px 6px;
+  }
+  #paper {
+    padding: 20px 18px;
+  }
+}
+
+@media print {
+  html, body, #desk,
+  body.dark-theme,
+  body.dark-theme #desk,
+  body.dark-theme #paper {
+    background: #ffffff !important;
+    color: #000000 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+  #original-banner {
+    display: none !important;
+  }
+  #paper {
+    box-shadow: none !important;
+    border: none !important;
+    max-width: 100% !important;
+    padding: 12mm !important;
+    min-height: auto !important;
+  }
+  mark.kd-search-match,
+  mark.kd-search-match.kd-search-active {
+    background-color: transparent !important;
+    outline: none !important;
+    color: inherit !important;
+  }
+}
+
+/* Extra bottom scroll space while the floating Kannada Varnamala keyboard is open */
+body.virtual-kb-open #desk {
+  padding-bottom: 340px !important;
+}

@@ -1,0 +1,137 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>API</title><style>
+:root{--bg:#fbfbfa;--fg:#1d1f23;--mut:#6b7280;--line:#e3e5e8;--card:#fff;--acc:#2f6fed;--ok:#1f8a4c;--bad:#c0392b;--wait:#b7791f;
+--new:#e6f6ea;--newb:#2e9e55;--prev:#e7f1fd;--prevb:#6aa5ee}
+@media (prefers-color-scheme:dark){:root{--bg:#16181c;--fg:#e6e8eb;--mut:#9aa3af;--line:#2c3038;--card:#1d2026;--acc:#7aa7ff;--ok:#4cc27f;--bad:#f0776a;--wait:#e0b050;
+--new:#16321f;--newb:#3fbf6c;--prev:#14263d;--prevb:#5b93dd}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 system-ui,Segoe UI,Roboto,sans-serif}
+a{color:var(--acc)}main{max-width:1000px;margin:0 auto;padding:16px}
+header.top{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:10px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+header.top h1{font-size:17px;margin:0;flex:1;min-width:200px}header.top .meta{color:var(--mut);font-size:12px}
+button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:6px;padding:4px 10px;cursor:pointer}
+.top .helplink{font-size:13px;white-space:nowrap}#fpnote{margin:8px 16px;padding:10px 12px;border:1px solid var(--line);background:var(--card);border-radius:6px}#fpnote p{margin:0 0 6px}#fpnote code{user-select:all;word-break:break-all}
+button.on{border-color:var(--acc);color:var(--acc)}
+.chip{display:inline-block;box-sizing:border-box;max-width:100%;overflow:hidden;text-overflow:ellipsis;vertical-align:bottom;font-size:12px;border:1px solid var(--line);border-radius:999px;padding:0 8px;margin-left:6px;color:var(--mut);white-space:nowrap}
+.chip.ok,.chip.done{color:var(--ok);border-color:var(--ok)}.chip.bad,.chip.stop{color:var(--bad);border-color:var(--bad)}.chip.wait{color:var(--wait);border-color:var(--wait)}.chip.run{color:var(--acc);border-color:var(--acc)}.chip.old{opacity:.6}
+.tabs{display:flex;gap:4px;flex-wrap:wrap;margin:12px 0;border-bottom:1px solid var(--line)}
+.tabs button{border-radius:6px 6px 0 0;border-bottom:none}.tabs button.on{background:var(--card);font-weight:600}
+.tab{display:none}.tab.on{display:block}
+h2{font-size:16px;margin:22px 0 8px}h3{font-size:14.5px;margin:16px 0 6px}h4,h5,h6{font-size:14px;margin:12px 0 4px}
+.summary,.q,.pre,details.sec,.card,.warn{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin:8px 0}
+.lead{font-size:16px;margin:0 0 8px}
+.trail{list-style:none;display:flex;flex-wrap:wrap;align-items:baseline;padding:0;margin:8px 0 2px;font-size:13px}
+.trail li{display:inline-flex;align-items:baseline;color:var(--mut)}
+.trail li:not(:last-child)::after{content:"→";margin:0 7px;opacity:.5}.trail li.all:not(:last-child)::after{content:"|";margin:0 9px}
+.trail li button{display:inline;border:0;background:none;padding:1px 2px;color:inherit;font:inherit;border-radius:3px;cursor:pointer}
+.trail li button small{margin-left:5px;font-size:11px;font-weight:400;opacity:.75}
+.trail li.past{color:var(--ok)}.trail li.here{color:var(--acc);font-weight:600}
+.trail li button:disabled{cursor:default;opacity:.45}
+.trail li button.sel{text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:4px}
+.phase-off{display:none!important}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px;margin:8px 0}
+.tile{border:1px solid var(--line);border-radius:8px;padding:8px 10px}.tile b{display:block;font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut)}
+.tile.need{border-color:var(--wait)}.tile.need b{color:var(--wait)}
+.asked{border-left:3px solid var(--acc);padding:2px 10px;margin:10px 0}.asked b{font-size:12px;color:var(--mut)}.asked p{margin:2px 0}
+ul.instr{list-style:none;padding:0;margin:0}ul.instr li{display:flex;gap:8px;align-items:baseline;padding:6px 8px;border-bottom:1px solid var(--line)}
+.iid{font:600 12px ui-monospace,Consolas,monospace;color:var(--mut);min-width:28px}.itext{flex:1}li.sup .itext{text-decoration:line-through;opacity:.6}
+.q.open{border-color:var(--wait)}.qh{display:flex;align-items:center;gap:4px}.when{margin-left:auto;color:var(--mut);font-size:12px}
+.qq{font-weight:600;margin:6px 0}.qf{margin:6px 0}.qf>b{font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut)}.qf p,.qf ul{margin:2px 0}
+.qf.answer{border-left:3px solid var(--ok);padding-left:10px}.qf.miss,.miss{color:var(--bad)}
+details.sec>summary{cursor:pointer;font-weight:600}details.sec[open]>summary{margin-bottom:8px}
+.tw{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:13.5px}th,td{border:1px solid var(--line);padding:4px 8px;text-align:left;vertical-align:top}th{background:rgba(127,127,127,.08)}
+pre{overflow-x:auto;background:rgba(127,127,127,.1);padding:8px 10px;border-radius:6px;font-size:12.5px}code{font-family:ui-monospace,Consolas,monospace;font-size:.92em;background:rgba(127,127,127,.12);padding:0 3px;border-radius:3px}pre code{background:none;padding:0}
+blockquote{margin:6px 0;padding:2px 12px;border-left:3px solid var(--line);color:var(--mut)}.box{font-size:1.05em}
+.warn{border-color:var(--bad)}.warn b{color:var(--bad)}.warn ul{margin:4px 0}
+[data-h].new{background:var(--new);box-shadow:inset 3px 0 0 var(--newb)}[data-h].prev{background:var(--prev);box-shadow:inset 3px 0 0 var(--prevb)}
+.legend{font-size:12px;color:var(--mut)}.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin:0 3px 0 8px;vertical-align:-1px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px}.card{margin:0;display:block;min-width:0;overflow:hidden;color:inherit;text-decoration:none}
+.card:hover{border-color:var(--acc)}.card h3{margin:0 0 4px;font-size:15px}.card .row{font-size:13px;margin:2px 0}.card .row b{color:var(--mut);font-weight:500}
+.card.need{border-color:var(--wait)}.badge{background:var(--newb);color:#fff;border-radius:999px;font-size:11.5px;padding:0 7px;margin-left:6px}
+.todo{background:var(--card);border:1px solid var(--wait);border-radius:8px;padding:10px 14px;margin:8px 0}.todo h3{margin:0 0 4px}.todo ul{margin:4px 0 0;padding-left:20px}
+.todo .nx{color:var(--mut);font-size:13px}.none{color:var(--mut)}
+ul.feed{list-style:none;padding:0;margin:0;background:var(--card);border:1px solid var(--line);border-radius:8px}
+ul.feed li{display:grid;grid-template-columns:118px 1fr;gap:10px;padding:7px 12px;border-bottom:1px solid var(--line)}ul.feed li:last-child{border-bottom:none}
+ul.feed .w{color:var(--mut);font-size:12.5px;white-space:nowrap}ul.feed .f{font-size:12.5px}ul.feed .chip{margin-left:0;margin-right:6px}
+.chip.problem{color:var(--bad);border-color:var(--bad)}.chip.decided,.chip.direction{color:var(--wait);border-color:var(--wait)}.chip.done{color:var(--ok);border-color:var(--ok)}
+.docs{display:flex;flex-wrap:wrap;gap:8px}.docs a{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:4px 12px;text-decoration:none}
+button.copy{margin-left:8px;font-size:12px;padding:1px 8px}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--newb);margin-left:6px}
+</style></head><body data-project="Writer - Kannada" data-page="d-api-docs.html" data-serve="python &quot;C:\Users\User\.a\templates\pages\page_build.py&quot; --root &quot;C:\Writer - Kannada&quot; --serve"><header class="top"><a href="index.html">&larr; all</a><h1>API</h1><a class="helplink" href="index.html#help" title="How to start, stop and open these pages">Help</a><span class="legend"><span id="newcount"></span><i style="background:var(--newb)"></i>new<i style="background:var(--prevb)"></i>the time before</span><button id="markread">Mark as read</button><button id="resync" title="Rebuilds the pages from the files, in the background">Resync</button><button id="auto" title="Follows the agent by itself. Click to switch off.">live</button><span class="meta">built 21 Nov 26, 09:35 PM</span></header><div id="fpnote" hidden></div><main><h2>API documentation</h2>
+<p data-h="4fae5c80ff">_Contracts this project exposes or depends on. Updated by <code>/A.close</code> when a feature changed one. One section per endpoint or interface: purpose, request, response, errors, since (feature number)._</p><p class="legend">Source: C:\Writer - Kannada\docs\api.md</p></main><script>
+(function(){
+  var KEY='a-pages:'+document.body.dataset.project+':'+document.body.dataset.page, st;
+  try{st=JSON.parse(localStorage.getItem(KEY)||'null')}catch(e){st=null}
+  var els=[].slice.call(document.querySelectorAll('[data-h]'));
+  function save(){try{localStorage.setItem(KEY,JSON.stringify(st))}catch(e){}}
+  if(!st){st={batch:0,seen:{}};els.forEach(function(e){st.seen[e.dataset.h]=0});save()}
+  function paint(){
+    var n=0;els.forEach(function(e){var b=st.seen[e.dataset.h];e.classList.remove('new','prev');
+      if(b===undefined){e.classList.add('new');n++}else if(st.batch>0&&b===st.batch){e.classList.add('prev')}});
+    var c=document.getElementById('newcount');if(c)c.textContent=n?n+' new since you last marked as read':'nothing new';
+    var m=document.getElementById('markread');if(m)m.disabled=!n;
+    [].forEach.call(document.querySelectorAll('.tabs button,details.sec>summary'),function(b){
+      var host=b.tagName==='BUTTON'?document.getElementById(b.dataset.tab):b.parentNode,d=b.querySelector('.dot');
+      var has=host&&host.querySelector('[data-h].new');
+      if(has&&!d){d=document.createElement('span');d.className='dot';b.appendChild(d)}else if(!has&&d){d.remove()}});
+  }
+  var mr=document.getElementById('markread');
+  if(mr)mr.onclick=function(){st.batch++;var keep={};els.forEach(function(e){var h=e.dataset.h,b=st.seen[h];keep[h]=(b===undefined)?st.batch:b});st.seen=keep;save();paint()};
+  [].forEach.call(document.querySelectorAll('.tabs button'),function(b){b.onclick=function(){
+    [].forEach.call(document.querySelectorAll('.tabs button,.tab'),function(x){x.classList.remove('on')});
+    b.classList.add('on');document.getElementById(b.dataset.tab).classList.add('on');try{sessionStorage.setItem(KEY+':tab',b.dataset.tab)}catch(e){}}});
+  try{var t=sessionStorage.getItem(KEY+':tab'),tb=t&&document.querySelector('.tabs button[data-tab="'+t+'"]');if(tb)tb.click();
+      var y=sessionStorage.getItem(KEY+':y');if(y)window.scrollTo(0,+y)}catch(e){}
+  var ar=document.getElementById('auto'),AK='a-pages:auto';
+  function live(){try{return localStorage.getItem(AK)!=='0'}catch(e){return true}}
+  var srv=/^https?:$/.test(location.protocol)&&/^(localhost|127\.0\.0\.1)$/.test(location.hostname),rs=document.getElementById('resync'),rev=null,boot=null;
+  function stay(){try{sessionStorage.setItem(KEY+':y',window.scrollY)}catch(e){}}
+  function hhmm(){var d=new Date();return d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}
+  function poll(){fetch('/status',{cache:'no-store'}).then(function(r){return r.json()}).then(function(j){
+      if(rev===null){rev=j.rev;boot=j.boot;if(rs&&!rs.dataset.busy)rs.textContent='Resync'}
+      else if(j.rev!==rev||j.boot!==boot){stay();location.reload()}
+    }).catch(function(){if(rs&&!rs.dataset.busy){rs.textContent='Server stopped (reconnects by itself)';rs.title='It restarts itself after the builder script changes. If it does not come back, start it again with /A.show, or: '+document.body.dataset.serve}})}
+  function arm(){if(live()){ar&&ar.classList.add('on');
+    if(srv){poll();setInterval(poll,4000)}else{setTimeout(function(){stay();location.reload()},15000)}}}
+  if(rs){
+    if(!srv){rs.disabled=true;rs.textContent='Resync (server off)';rs.title='Open this page through the server to use Resync: /A.show, or: '+document.body.dataset.serve}
+    else rs.onclick=function(){rs.dataset.busy='1';rs.disabled=true;rs.textContent='Syncing…';
+      fetch('/resync',{method:'POST',headers:{'X-Resync':'1'}}).then(function(r){return r.json()}).then(function(j){
+        rs.textContent='Synced '+hhmm()+(j.warnings?' · '+j.warnings+' format problem(s)':'');setTimeout(function(){stay();location.reload()},500)
+      }).catch(function(){rs.textContent='Server not running';rs.title='Start it with /A.show, or: '+document.body.dataset.serve;rs.disabled=false;delete rs.dataset.busy})}}
+  if(ar)ar.onclick=function(){try{localStorage.setItem(AK,live()?'0':'1')}catch(e){}location.reload()};
+  var ph=document.getElementById('phases');
+  if(ph){var bs=[].slice.call(ph.querySelectorAll('button')),pn=document.getElementById('phasenote'),PK=KEY+':phase';
+    var pick=function(i){var b=bs[i];if(!b||b.disabled)return;bs.forEach(function(x){x.classList.remove('sel')});b.classList.add('sel');
+      var all=b.dataset.all==='1',sp=(b.dataset.spans||'').split(',').filter(Boolean).map(function(q){var p=q.split(':');return[+p[0],+p[1]]}),n=0;
+      [].forEach.call(document.querySelectorAll('[data-ts]'),function(el){var t=+el.dataset.ts,ok=all||sp.some(function(r){return t>=r[0]&&t<r[1]});
+        el.classList.toggle('phase-off',!ok);if(ok)n++});
+      pn.textContent=all?'':'Showing '+b.dataset.label+': '+n+' dated entr'+(n===1?'y':'ies')+'. Parts without a date stay visible. Click All for everything.';
+      try{sessionStorage.setItem(PK,String(i))}catch(e){}};
+    bs.forEach(function(b,i){b.onclick=function(){pick(i)}});
+    try{var sv=sessionStorage.getItem(PK);if(sv!==null&&+sv>0)pick(+sv)}catch(e){}}
+  var fp=document.getElementById('fplink');
+  if(fp)fp.onclick=function(){var note=document.getElementById('fpnote'),url=fp.dataset.url,w=window.open('','a-code-map');
+    fetch(url,{mode:'no-cors',cache:'no-store'}).then(function(){note.hidden=true;if(w)w.location.href=url;else location.href=url},function(){
+      if(w)w.close();note.textContent='';note.hidden=false;
+      var p=document.createElement('p'),c=document.createElement('code');
+      p.textContent='The code map is not running. Start it by running this in a terminal, then click Code map again:';
+      c.textContent=fp.dataset.start||'(no start command is set: add floorplan_start to .a/project.md)';
+      note.appendChild(p);note.appendChild(c)})};
+  [].forEach.call(document.querySelectorAll('button.copy'),function(b){b.onclick=function(){
+    var t=b.dataset.copy,done=function(){var o=b.textContent;b.textContent='copied';setTimeout(function(){b.textContent=o},1200)};
+    if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(done,function(){})}
+    else{var a=document.createElement('textarea');a.value=t;document.body.appendChild(a);a.select();try{document.execCommand('copy');done()}catch(e){}a.remove()}}});
+  if(location.hash){var tgt=document.getElementById(location.hash.slice(1)),tabEl=tgt&&tgt.closest('.tab');
+    if(tabEl){var tb2=document.querySelector('.tabs button[data-tab="'+tabEl.id+'"]');if(tb2)tb2.click();tgt.scrollIntoView()}}
+  arm();
+  [].forEach.call(document.querySelectorAll('a.card[data-hashes]'),function(a){
+    var s;try{s=JSON.parse(localStorage.getItem('a-pages:'+document.body.dataset.project+':'+a.dataset.pagekey)||'null')}catch(e){s=null}
+    if(!s)return;var n=a.dataset.hashes.split(',').filter(function(x){return x&&s.seen[x]===undefined}).length;
+    if(n){var b=document.createElement('span');b.className='badge';b.textContent=n+' new';a.querySelector('h3').appendChild(b)}});
+  paint();
+})();
+(function(){  // home page: no live server -> land on Help (moved to the top, opened, with a banner); server running -> the project view
+  var hp=document.getElementById('help'),nt=document.getElementById('srvnote');if(!hp||!nt)return;
+  function off(){var m=document.querySelector('main');nt.hidden=false;hp.open=true;m.insertBefore(hp,m.firstChild);m.insertBefore(nt,m.firstChild);window.scrollTo(0,0)}
+  if(!/^https?:$/.test(location.protocol)){off();return}
+  fetch('/status',{cache:'no-store'}).then(function(r){if(!r.ok)throw 0;return r.json()}).then(function(j){if(!j||!j.ok)off()}).catch(off)})();
+</script></body></html>

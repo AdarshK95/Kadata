@@ -1,0 +1,86 @@
+[
+  {
+    "path": "01_router_magic_bytes/01_valid_word_nudi.docx",
+    "expectedFormat": "DOCX",
+    "magicBytesHex": "50 4B 03 04",
+    "phase": "Phase 1 & 2",
+    "purpose": "Valid .docx containing Nudi 01 e Kannada runs mixed with Calibri/Arial English runs."
+  },
+  {
+    "path": "01_router_magic_bytes/02_non_word_archive.xlsx",
+    "expectedFormat": "UNSUPPORTED",
+    "magicBytesHex": "50 4B 03 04",
+    "phase": "Phase 1",
+    "purpose": "ZIP archive without word/document.xml; confirms DocumentRouter rejects non-Word ZIPs."
+  },
+  {
+    "path": "01_router_magic_bytes/03_legacy_word97_ole2.doc",
+    "expectedFormat": "DOC",
+    "magicBytesHex": "D0 CF 11 E0 A1 B1 1A E1",
+    "phase": "Phase 1",
+    "purpose": "Valid minimal OLE2 Compound Binary File (CFBF) header for binary .doc routing tests."
+  },
+  {
+    "path": "01_router_magic_bytes/04_sample_document.pdf",
+    "expectedFormat": "PDF",
+    "magicBytesHex": "25 50 44 46",
+    "phase": "Phase 1 & 4",
+    "purpose": "2-page PDF for magic-byte routing, Jetpack two-page tablet viewer, and PDFBox extraction."
+  },
+  {
+    "path": "01_router_magic_bytes/05_misnamed_rtf_as_doc.doc",
+    "expectedFormat": "RTF",
+    "magicBytesHex": "7B 5C 72 74 66",
+    "phase": "Phase 1 & 2",
+    "purpose": "RTF with Nudi 01 e \\fonttbl and Cp1252 hex escapes, deliberately named .doc."
+  },
+  {
+    "path": "01_router_magic_bytes/06_nudi_cp1252_notes.txt",
+    "expectedFormat": "TXT",
+    "magicBytesHex": "50 C0 A3 C1 F0 6C 50 C0",
+    "phase": "Phase 1 & 2",
+    "purpose": "Windows-1252 (Cp1252) Nudi text (invalid UTF-8) to verify high-ASCII acceptance & fallback."
+  },
+  {
+    "path": "01_router_magic_bytes/07_binary_image_rejected.png",
+    "expectedFormat": "UNSUPPORTED",
+    "magicBytesHex": "89 50 4E 47 0D 0A 1A 0A",
+    "phase": "Phase 1",
+    "purpose": "Binary PNG with NUL bytes; confirms DocumentRouter rejects non-document binaries."
+  },
+  {
+    "path": "02_parser_and_font_fixtures/08_misnamed_docx_as_doc.doc",
+    "expectedFormat": "DOCX",
+    "magicBytesHex": "50 4B 03 04",
+    "phase": "Phase 1 & 2",
+    "purpose": "Real .docx renamed to .doc; confirms magic-byte detection overrides file extension."
+  },
+  {
+    "path": "02_parser_and_font_fixtures/09_style_inheritance_nudi.docx",
+    "expectedFormat": "DOCX",
+    "magicBytesHex": "50 4B 03 04",
+    "phase": "Phase 2",
+    "purpose": "Tests all 4 DocxParser style inheritance levels (direct rPr, rStyle, pStyle+basedOn, docDefaults)."
+  },
+  {
+    "path": "02_parser_and_font_fixtures/10_mixed_table_baraha_english.docx",
+    "expectedFormat": "DOCX",
+    "magicBytesHex": "50 4B 03 04",
+    "phase": "Phase 2 & 3",
+    "purpose": "Word table combining Calibri English headers with Nudi 01 e, BRH Kannada, and Shree-Kan-0850 cells."
+  },
+  {
+    "path": "02_parser_and_font_fixtures/11_unicode_kannada_already_clean.docx",
+    "expectedFormat": "DOCX",
+    "magicBytesHex": "50 4B 03 04",
+    "phase": "Phase 2 & 3",
+    "purpose": "Clean Unicode Kannada (Noto Sans Kannada); confirms converter passes Unicode runs untouched."
+  },
+  {
+    "path": "02_parser_and_font_fixtures/12_utf8_bom_rtf.rtf",
+    "expectedFormat": "RTF",
+    "magicBytesHex": "EF BB BF 7B 5C 72 74 66",
+    "phase": "Phase 1",
+    "purpose": "RTF prefixed with a UTF-8 BOM (EF BB BF) to verify DocumentRouter BOM offset handling."
+  }
+]
