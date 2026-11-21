@@ -19,10 +19,12 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -92,9 +94,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.movableContentOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -144,6 +148,7 @@ fun EditorScreen(
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showDocInfoDialog by remember { mutableStateOf(false) }
     var showKannadaKeyboard by remember { mutableStateOf(false) }
+    var keyboardAnchor by remember { mutableStateOf(KeyboardAnchor.BOTTOM_LEFT) }
 
     // Two-step export / share different format dialog state
     var pendingExportAction by remember { mutableStateOf<ExportAction?>(null) }
@@ -264,20 +269,25 @@ fun EditorScreen(
             Surface(
                 color = MaterialTheme.colorScheme.surface,
                 contentColor = MaterialTheme.colorScheme.onSurface,
-                tonalElevation = 1.dp,
+                tonalElevation = if (showKannadaKeyboard) 0.dp else 1.dp,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Row(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .statusBarsPadding()
-                        .height(48.dp)
-                        .padding(horizontal = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically
                 ) {
+                    AnimatedVisibility(visible = !showKannadaKeyboard) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .padding(horizontal = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
                     IconButton(
                         onClick = {
-                            execJs("window.KannadaDocEditor && window.KannadaDocEditor.setVirtualKeyboardMode(false);")
+                            execJs("window.KannadaDocEditor && window.KannadaDocEditor.setVirtualKeyboardMode(false, false, 0);")
                             execJs("window.KannadaDocEditor && window.KannadaDocEditor.clearSearch();")
                             execJs("window.KannadaDocEditor && window.KannadaDocEditor.flushDraft();")
                             onBack()
@@ -414,7 +424,7 @@ fun EditorScreen(
                                     val next = !uiState.isOriginalView
                                     if (next && showKannadaKeyboard) {
                                         showKannadaKeyboard = false
-                                        execJs("window.KannadaDocEditor.setVirtualKeyboardMode(false);")
+                                        execJs("window.KannadaDocEditor.setVirtualKeyboardMode(false, false, 0);")
                                     }
                                     viewModel.setOriginalView(next)
                                     execJs("window.KannadaDocEditor.setOriginalView($next);")
@@ -464,22 +474,80 @@ fun EditorScreen(
                             )
                         }
                     }
+                        }
+                    }
                 }
             }
         },
         snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { padding ->
-        Column(
+        // Stable WebView slot preserved across Tablet side-by-side Row <-> Phone Column transitions
+        val latestOnExportReady by rememberUpdatedState({ mode: String, idmJson: String, isAutoSave: Boolean ->
+            viewModel.handleExportPayload(
+                exportMode = mode,
+                idmJson = idmJson,
+                isAutoSave = isAutoSave,
+                onRequestSafCreateFile = { suggested, mime ->
+                    when (mime) {
+                        TargetFileType.DOC.mimeType -> createDocLauncher.launch(suggested)
+                        TargetFileType.PDF.mimeType -> createPdfLauncher.launch(suggested)
+                        else -> createDocxLauncher.launch(suggested)
+                    }
+                }
+            )
+        })
+        val latestOnReplaceDone by rememberUpdatedState({ replacedCount: Int ->
+            if (replacedCount > 1) {
+                coroutineScope.launch {
+                    snackbarHostState.showSnackbar("Replaced $replacedCount occurrences")
+                }
+            } else if (replacedCount == 0 && findQuery.isNotEmpty()) {
+                coroutineScope.launch {
+                    snackbarHostState.showSnackbar("No matches found")
+                }
+            }
+        })
+        val stableWebViewSlot = remember {
+            movableContentOf {
+                EditorWebViewHost(
+                    onWebViewCreated = { webViewRef = it },
+                    onEditorReady = { isWebReady = true },
+                    onDocumentLoaded = viewModel::onWebDocumentLoaded,
+                    onContentDirty = viewModel::markDirty,
+                    onDraftChanged = viewModel::onDraftChanged,
+                    onExportReady = { mode, idmJson, isAutoSave ->
+                        latestOnExportReady(mode, idmJson, isAutoSave)
+                    },
+                    onSearchResults = { current, total ->
+                        currentMatchIdx = current
+                        totalMatches = total
+                    },
+                    onReplaceDone = { count ->
+                        latestOnReplaceDone(count)
+                    },
+                    onEditorError = { err ->
+                        viewModel.reportEditorError(err)
+                    }
+                )
+            }
+        }
+
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
         ) {
+            val viewportWidth = maxWidth
+            val viewportHeight = maxHeight
+            val isTabletSideMode = viewportWidth >= 600.dp
+
+            Column(modifier = Modifier.fillMaxSize()) {
             if (uiState.isSaving) {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             }
 
             // Collapsible Formatting Strip (Table button removed as requested)
-            AnimatedVisibility(visible = uiState.showFormattingStrip && !uiState.isOriginalView) {
+            AnimatedVisibility(visible = uiState.showFormattingStrip && !uiState.isOriginalView && !showKannadaKeyboard) {
                 Surface(
                     color = MaterialTheme.colorScheme.surfaceVariant,
                     modifier = Modifier.fillMaxWidth()
@@ -714,101 +782,122 @@ fun EditorScreen(
                 }
             }
 
-            Box(modifier = Modifier.fillMaxSize()) {
-                EditorWebViewHost(
-                    onWebViewCreated = { webViewRef = it },
-                    onEditorReady = { isWebReady = true },
-                    onDocumentLoaded = viewModel::onWebDocumentLoaded,
-                    onContentDirty = viewModel::markDirty,
-                    onDraftChanged = viewModel::onDraftChanged,
-                    onExportReady = { mode, idmJson, isAutoSave ->
-                        viewModel.handleExportPayload(
-                            exportMode = mode,
-                            idmJson = idmJson,
-                            isAutoSave = isAutoSave,
-                            onRequestSafCreateFile = { suggested, mime ->
-                                when (mime) {
-                                    TargetFileType.DOC.mimeType -> createDocLauncher.launch(suggested)
-                                    TargetFileType.PDF.mimeType -> createPdfLauncher.launch(suggested)
-                                    else -> createDocxLauncher.launch(suggested)
-                                }
+                val keyboardVisible = showKannadaKeyboard && !uiState.isLoading && !uiState.isOriginalView
+
+                if (isTabletSideMode && keyboardVisible) {
+                    // TABLET SIDE-BY-SIDE MODE:
+                    // Left = resizable Kannada hover keyboard (not restricted to bottom half)
+                    // Right = document preview shifted right, filling 100% of remaining space
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f)
+                    ) {
+                        KannadaKeyboardPane(
+                            totalScreenWidth = viewportWidth,
+                            totalScreenHeight = viewportHeight,
+                            isTabletSideMode = true,
+                            knOnly = knOnly,
+                            onTopLimitChanged = { limitPx ->
+                                execJs("window.KannadaDocEditor && window.KannadaDocEditor.updateKeyboardTopLimit($limitPx);")
+                            },
+                            onInsertText = { text, isSubscript ->
+                                execJs(
+                                    "window.KannadaDocEditor && window.KannadaDocEditor.insertTextAtCursor(" +
+                                        "${JSONObject.quote(text)}, $isSubscript);"
+                                )
+                            },
+                            onBackspace = {
+                                execJs("window.KannadaDocEditor && window.KannadaDocEditor.deleteBackAtCursor();")
+                            },
+                            onEnter = {
+                                execJs("window.KannadaDocEditor && window.KannadaDocEditor.insertNewLineAtCursor();")
+                            },
+                            onClose = {
+                                showKannadaKeyboard = false
+                                execJs("window.KannadaDocEditor && window.KannadaDocEditor.setVirtualKeyboardMode(false, false, 0);")
                             }
                         )
-                    },
-                    onSearchResults = { current, total ->
-                        currentMatchIdx = current
-                        totalMatches = total
-                    },
-                    onReplaceDone = { replacedCount ->
-                        if (replacedCount > 1) {
-                            coroutineScope.launch {
-                                snackbarHostState.showSnackbar("Replaced $replacedCount occurrences")
-                            }
-                        } else if (replacedCount == 0 && findQuery.isNotEmpty()) {
-                            coroutineScope.launch {
-                                snackbarHostState.showSnackbar("No matches found")
-                            }
-                        }
-                    },
-                    onEditorError = { err ->
-                        viewModel.reportEditorError(err)
-                    }
-                )
 
-                // Always-on-top draggable Floating Kannada Varnamala Keyboard (below formatter bar)
-                if (!uiState.isLoading && !uiState.isOriginalView) {
-                    FloatingKannadaKeyboardOverlay(
-                        isOpen = showKannadaKeyboard,
-                        knOnly = knOnly,
-                        onToggleOpen = {
-                            val nextOpen = !showKannadaKeyboard
-                            showKannadaKeyboard = nextOpen
-                            if (nextOpen) {
-                                // Close default Android soft keyboard (Gboard) immediately
-                                softwareKeyboardController?.hide()
-                                webViewRef?.let { wv ->
-                                    val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-                                    imm?.hideSoftInputFromWindow(wv.windowToken, 0)
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                        ) {
+                            stableWebViewSlot()
+                        }
+                    }
+                } else {
+                    // PHONE MODE (or Tablet with keyboard closed):
+                    // Top = document WebView; Bottom (on phone when open) = <= 50% docked keyboard
+                    Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                        stableWebViewSlot()
+
+                        if (!uiState.isLoading && !uiState.isOriginalView && !showKannadaKeyboard) {
+                            FloatingKeyboardToggleButton(
+                                anchor = keyboardAnchor,
+                                onAnchorChange = { keyboardAnchor = it },
+                                onOpenKeyboard = {
+                                    showKannadaKeyboard = true
+                                    softwareKeyboardController?.hide()
+                                    webViewRef?.let { wv ->
+                                        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+                                        imm?.hideSoftInputFromWindow(wv.windowToken, 0)
+                                    }
+                                    execJs("window.KannadaDocEditor && window.KannadaDocEditor.setVirtualKeyboardMode(true, $isTabletSideMode, 0);")
                                 }
-                                execJs("window.KannadaDocEditor && window.KannadaDocEditor.setVirtualKeyboardMode(true);")
-                            } else {
-                                execJs("window.KannadaDocEditor && window.KannadaDocEditor.setVirtualKeyboardMode(false);")
-                            }
-                        },
-                        onInsertText = { text, isSubscript ->
-                            execJs(
-                                "window.KannadaDocEditor && window.KannadaDocEditor.insertTextAtCursor(" +
-                                    "${JSONObject.quote(text)}, $isSubscript);"
                             )
-                        },
-                        onBackspace = {
-                            execJs("window.KannadaDocEditor && window.KannadaDocEditor.deleteBackAtCursor();")
-                        },
-                        onEnter = {
-                            execJs("window.KannadaDocEditor && window.KannadaDocEditor.insertNewLineAtCursor();")
                         }
-                    )
-                }
 
-                if (uiState.isLoading) {
-                    Surface(
-                        color = MaterialTheme.colorScheme.background.copy(alpha = 0.85f),
-                        modifier = Modifier.fillMaxSize()
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                CircularProgressIndicator()
-                                Spacer(Modifier.height(14.dp))
-                                Text(
-                                    text = if (knOnly) "ದಾಖಲೆ ತೆರೆಯುತ್ತಿದೆ..."
-                                    else "Opening document... • ದಾಖಲೆ ತೆರೆಯುತ್ತಿದೆ...",
-                                    style = MaterialTheme.typography.titleMedium
-                                )
+                        if (uiState.isLoading) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.background.copy(alpha = 0.85f),
+                                modifier = Modifier.fillMaxSize()
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                        CircularProgressIndicator()
+                                        Spacer(Modifier.height(14.dp))
+                                        Text(
+                                            text = if (knOnly) "ದಾಖಲೆ ತೆರೆಯುತ್ತಿದೆ..."
+                                            else "Opening document... • ದಾಖಲೆ ತೆರೆಯುತ್ತಿದೆ...",
+                                            style = MaterialTheme.typography.titleMedium
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
+
+                    if (keyboardVisible) {
+                        KannadaKeyboardPane(
+                            totalScreenWidth = viewportWidth,
+                            totalScreenHeight = viewportHeight,
+                            isTabletSideMode = false,
+                            knOnly = knOnly,
+                            onTopLimitChanged = { limitPx ->
+                                execJs("window.KannadaDocEditor && window.KannadaDocEditor.updateKeyboardTopLimit($limitPx);")
+                            },
+                            onInsertText = { text, isSubscript ->
+                                execJs(
+                                    "window.KannadaDocEditor && window.KannadaDocEditor.insertTextAtCursor(" +
+                                        "${JSONObject.quote(text)}, $isSubscript);"
+                                )
+                            },
+                            onBackspace = {
+                                execJs("window.KannadaDocEditor && window.KannadaDocEditor.deleteBackAtCursor();")
+                            },
+                            onEnter = {
+                                execJs("window.KannadaDocEditor && window.KannadaDocEditor.insertNewLineAtCursor();")
+                            },
+                            onClose = {
+                                showKannadaKeyboard = false
+                                execJs("window.KannadaDocEditor && window.KannadaDocEditor.setVirtualKeyboardMode(false, false, 0);")
+                            }
+                        )
+                    }
                 }
-            }
+        }
         }
     }
 

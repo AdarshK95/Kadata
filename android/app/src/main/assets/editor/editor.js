@@ -22,6 +22,7 @@
 
   // Saved caret Range for the floating Kannada Varnamala keyboard
   let savedCaretRange = null;
+  let keyboardTopLimitPx = 0; // On tablet: Y limit (px) of the keyboard's top edge
   const KANNADA_TRAILING_SIGN_RE = /[\u0CBE-\u0CCC\u0C82\u0C83]$/;
 
   function isNodeInsidePaper(node) {
@@ -71,22 +72,61 @@
     return placeCaretAtEndOfPaper();
   }
 
+  function measureCaretClientRect(range) {
+    if (!range) return null;
+    const rects = range.getClientRects();
+    if (rects && rects.length > 0) {
+      const r = rects[rects.length - 1];
+      if (r.height > 0 || r.top !== 0) return r;
+    }
+    const bRect = range.getBoundingClientRect();
+    if (bRect && (bRect.height > 0 || bRect.top !== 0)) return bRect;
+
+    // Collapsed caret on an empty line (<p><br></p>) often reports (0,0,0,0):
+    // measure the containing block element's top instead.
+    const el = range.startContainer.nodeType === Node.ELEMENT_NODE
+      ? range.startContainer
+      : range.startContainer.parentElement;
+    return el ? el.getBoundingClientRect() : null;
+  }
+
+  function scrollCursorLineToTop(smooth) {
+    try {
+      const range = restoreCaretInPaper();
+      const rect = measureCaretClientRect(range);
+      if (!rect) return;
+      const desiredTop = 18;
+      const deltaY = rect.top - desiredTop;
+      if (Math.abs(deltaY) > 6) {
+        window.scrollBy({
+          top: deltaY,
+          left: 0,
+          behavior: smooth ? 'smooth' : 'auto'
+        });
+      }
+    } catch (_) {
+      // Ignore scrolling errors
+    }
+  }
+
   function scrollCaretIntoView() {
     try {
       const sel = window.getSelection();
       if (!sel || sel.rangeCount === 0) return;
       const range = sel.getRangeAt(0);
-      const rect = range.getBoundingClientRect();
-      if (rect && (rect.top !== 0 || rect.bottom !== 0)) {
-        const viewHeight = window.innerHeight || document.documentElement.clientHeight;
-        if (rect.top < 40 || rect.bottom > viewHeight - 40) {
-          const el = range.startContainer.nodeType === Node.ELEMENT_NODE
-            ? range.startContainer
-            : range.startContainer.parentElement;
-          if (el && el.scrollIntoView) {
-            el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
-          }
+      const rect = measureCaretClientRect(range);
+      if (!rect) return;
+      const viewHeight = window.innerHeight || document.documentElement.clientHeight;
+      if (document.body.classList.contains('virtual-kb-open')) {
+        // Keep the cursor strictly above the keyboard's top limit (or near top of pane)
+        const maxAllowedBottom = (keyboardTopLimitPx > 72)
+          ? Math.min(viewHeight - 28, keyboardTopLimitPx - 12)
+          : Math.min(viewHeight - 28, 120);
+        if (rect.top < 10 || rect.bottom > maxAllowedBottom) {
+          window.scrollBy({ top: rect.top - 18, left: 0, behavior: 'auto' });
         }
+      } else if (rect.top < 32 || rect.bottom > viewHeight - 32) {
+        window.scrollBy({ top: rect.top - viewHeight / 3, left: 0, behavior: 'smooth' });
       }
     } catch (_) {
       // Ignore scrolling errors
@@ -660,14 +700,32 @@
     },
 
     // --- Floating Kannada Varnamala Keyboard API ---
-    setVirtualKeyboardMode(enabled) {
+    setVirtualKeyboardMode(enabled, isTabletSideMode, topLimitPx) {
       if (enabled) {
         paper.setAttribute('inputmode', 'none');
         document.body.classList.add('virtual-kb-open');
+        document.body.classList.toggle('tablet-kb-open', !!isTabletSideMode);
+        keyboardTopLimitPx = (typeof topLimitPx === 'number' && topLimitPx > 0) ? topLimitPx : 0;
+        // Bring the cursor's active line right to the top of the visible document pane
+        setTimeout(() => scrollCursorLineToTop(true), 90);
+        setTimeout(() => scrollCursorLineToTop(false), 260);
       } else {
         paper.removeAttribute('inputmode');
         document.body.classList.remove('virtual-kb-open');
+        document.body.classList.remove('tablet-kb-open');
+        keyboardTopLimitPx = 0;
       }
+    },
+
+    updateKeyboardTopLimit(topLimitPx) {
+      keyboardTopLimitPx = (typeof topLimitPx === 'number' && topLimitPx > 0) ? topLimitPx : 0;
+      if (document.body.classList.contains('virtual-kb-open')) {
+        scrollCaretIntoView();
+      }
+    },
+
+    scrollCursorToTop() {
+      scrollCursorLineToTop(true);
     },
 
     insertTextAtCursor(text, isSubscriptModifier) {

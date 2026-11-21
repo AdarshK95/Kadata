@@ -260,5 +260,22 @@ body.dark-theme mark.kd-search-match.kd-search-active {
 
 /* Extra bottom scroll space while the floating Kannada Varnamala keyboard is open */
 body.virtual-kb-open #desk {
-  padding-bottom: 340px !important;
+  padding-top: 8px !important;
+  padding-bottom: 72vh !important;
+}
+
+body.virtual-kb-open #paper {
+  padding-top: 18px !important;
+  padding-bottom: 60vh !important;
+}
+
+/* Tablet side-by-side mode: document moves right and fills all available horizontal space cleanly */
+body.tablet-kb-open #desk {
+  padding: 10px 12px 72vh 12px !important;
+  align-items: stretch !important;
+}
+
+body.tablet-kb-open #paper {
+  max-width: 100% !important;
+  padding: 20px 26px 60vh 26px !important;
 }

@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -174,28 +175,65 @@ fun HomeScreen(
     }
 
     val configuration = LocalConfiguration.current
-    val useTabletArt = configuration.screenWidthDp > configuration.screenHeightDp
-    val blurredBgRes = if (useTabletArt) R.drawable.kadata_bg_tablet_blur else R.drawable.kadata_bg_mobile_blur
+    val isLandscape = configuration.screenWidthDp > configuration.screenHeightDp
+    val isTabletSplitHome = configuration.screenWidthDp >= 600 && isLandscape
+    val blurredBgRes = if (isLandscape) R.drawable.kadata_bg_tablet_blur else R.drawable.kadata_bg_mobile_blur
     val bgScrimColor = if (userSettings.isDarkTheme) {
         Color(0xA80F161E)
     } else {
         Color(0x88FAF3E3)
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        Image(
-            painter = painterResource(id = blurredBgRes),
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize()
-        )
+    // Aspect-matched left showcase width on tablets (~30% of screen width -> ~6% crop on kadata_bg_mobile)
+    val maxTabletLeft = (configuration.screenWidthDp * 0.36f).dp.coerceAtLeast(180.dp)
+    val minTabletLeft = 220.dp.coerceAtMost(maxTabletLeft)
+    val tabletLeftShowcaseWidth = (configuration.screenHeightDp * 0.48f).dp
+        .coerceIn(minTabletLeft, maxTabletLeft)
+
+    Row(modifier = Modifier.fillMaxSize()) {
+        if (isTabletSplitHome) {
+            // LEFT SECTION (Tablet): Crisp, uninterrupted Kadata showcase always visible
+            Box(
+                modifier = Modifier
+                    .width(tabletLeftShowcaseWidth)
+                    .fillMaxHeight()
+                    .background(Color(0xFFFAF3E3))
+            ) {
+                Image(
+                    painter = painterResource(id = R.drawable.kadata_bg_mobile),
+                    contentDescription = "Kadata",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+            // Subtle vertical seam separating the crisp showcase from the blurred workspace
+            Box(
+                modifier = Modifier
+                    .width(1.dp)
+                    .fillMaxHeight()
+                    .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.45f))
+            )
+        }
+
+        // RIGHT SECTION (Tablet) or FULL SCREEN (Phone): Blurred background + Main Home Layout
         Box(
             modifier = Modifier
-                .fillMaxSize()
-                .background(bgScrimColor)
-        )
+                .weight(1f)
+                .fillMaxHeight()
+        ) {
+            Image(
+                painter = painterResource(id = blurredBgRes),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(bgScrimColor)
+            )
 
-        Scaffold(
+            Scaffold(
             containerColor = Color.Transparent,
             contentColor = MaterialTheme.colorScheme.onBackground,
             topBar = {
@@ -409,6 +447,7 @@ fun HomeScreen(
                     }
                 }
             }
+        }
         }
     }
 
