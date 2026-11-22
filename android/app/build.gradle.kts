@@ -14,8 +14,8 @@ android {
         applicationId = "com.kannadadoc"
         minSdk = 28
         targetSdk = 35
-        versionCode = 10
-        versionName = "0.10.0"
+        versionCode = 172
+        versionName = "0.17.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
