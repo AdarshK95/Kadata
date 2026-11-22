@@ -38,11 +38,12 @@ html, body {
   color: #1d242b;
   font-family: 'KannadaDocUnicode', 'Noto Sans Kannada', 'Tunga', sans-serif;
   -webkit-font-smoothing: antialiased;
+  overflow-x: auto;
 }
 
 #desk {
   min-height: 100vh;
-  padding: 20px 16px 80px 16px;
+  padding: 14px 12px 120px 12px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -66,14 +67,17 @@ html, body {
   display: none !important;
 }
 
+/* ~3 pages (~105 lines / 2400px) of extra scrollable space below content so
+   the user can always scroll freely past the end of short documents and the
+   cursor never gets trapped behind the keyboard. */
 #paper {
   width: 100%;
   max-width: var(--paper-max-width);
-  min-height: 82vh;
+  min-height: 85vh;
   background: #fffdf8;
   border-radius: 10px;
   box-shadow: 0 2px 12px rgba(26, 77, 122, 0.10);
-  padding: 40px 48px;
+  padding: 28px 34px 2400px 34px;
   font-size: var(--editor-font-size);
   line-height: 1.75;
   outline: none;
@@ -127,18 +131,22 @@ html, body {
   margin-bottom: 0.35em;
 }
 
+/* Prevent tables from overflowing/clipping off the right edge on narrow phone screens */
 #paper table {
   width: 100%;
+  max-width: 100%;
   border-collapse: collapse;
   margin: 14px 0 18px 0;
-  table-layout: auto;
+  table-layout: fixed;
 }
 
 #paper td, #paper th {
   border: 1px solid #c9bea6;
-  padding: 8px 12px;
+  padding: 7px 9px;
   vertical-align: top;
-  min-width: 60px;
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+  hyphens: auto;
 }
 
 #paper tr:first-child td, #paper th {
@@ -223,10 +231,10 @@ body.dark-theme mark.kd-search-match.kd-search-active {
 
 @media (max-width: 640px) {
   #desk {
-    padding: 8px 6px 60px 6px;
+    padding: 8px 6px 100px 6px;
   }
   #paper {
-    padding: 20px 18px;
+    padding: 18px 16px 2200px 16px;
   }
 }
 
@@ -258,24 +266,23 @@ body.dark-theme mark.kd-search-match.kd-search-active {
   }
 }
 
-/* Extra bottom scroll space while the floating Kannada Varnamala keyboard is open */
+/* Virtual Kannada keyboard open */
 body.virtual-kb-open #desk {
   padding-top: 8px !important;
-  padding-bottom: 72vh !important;
 }
 
 body.virtual-kb-open #paper {
-  padding-top: 18px !important;
-  padding-bottom: 60vh !important;
+  padding-top: 16px !important;
+  padding-bottom: 2400px !important;
 }
 
-/* Tablet side-by-side mode: document moves right and fills all available horizontal space cleanly */
+/* Tablet side-by-side mode: document moves right and fills 100% remaining width */
 body.tablet-kb-open #desk {
-  padding: 10px 12px 72vh 12px !important;
+  padding: 10px 12px 120px 12px !important;
   align-items: stretch !important;
 }
 
 body.tablet-kb-open #paper {
   max-width: 100% !important;
-  padding: 20px 26px 60vh 26px !important;
+  padding: 20px 26px 2400px 26px !important;
 }

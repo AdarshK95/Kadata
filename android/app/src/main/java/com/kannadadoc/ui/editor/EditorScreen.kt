@@ -30,7 +30,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
@@ -61,6 +63,7 @@ import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.TextDecrease
 import androidx.compose.material.icons.filled.TextIncrease
 import androidx.compose.material.icons.filled.Visibility
@@ -86,6 +89,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -103,7 +107,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -130,10 +137,13 @@ fun EditorScreen(
     onThemeModeChange: (AppThemeMode) -> Unit,
     onSaveFormatChange: (DefaultSaveFormat) -> Unit,
     onAutoSaveIntervalChange: (Int) -> Unit,
+    onBlockAutoKeyboardChange: (Boolean) -> Unit,
     onDefaultFontSizeChange: (Int) -> Unit,
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
+    val density = LocalDensity.current
+    val isSystemKeyboardOpen = WindowInsets.ime.getBottom(density) > 0
     val softwareKeyboardController = LocalSoftwareKeyboardController.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val coroutineScope = rememberCoroutineScope()
@@ -147,6 +157,8 @@ fun EditorScreen(
     var showOverflowMenu by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showDocInfoDialog by remember { mutableStateOf(false) }
+    var showChangeDocTypeDialog by remember { mutableStateOf(false) }
+    var pendingConvertTarget by remember { mutableStateOf<KannadaEncodingChoice?>(null) }
     var showKannadaKeyboard by remember { mutableStateOf(false) }
     var keyboardAnchor by remember { mutableStateOf(KeyboardAnchor.BOTTOM_LEFT) }
 
@@ -159,6 +171,7 @@ fun EditorScreen(
 
     // Find & Replace UI state
     var showFindBar by remember { mutableStateOf(false) }
+    val findFocusRequester = remember { FocusRequester() }
     var showReplaceRow by remember { mutableStateOf(true) }
     var findQuery by remember { mutableStateOf("") }
     var replaceQuery by remember { mutableStateOf("") }
@@ -210,6 +223,29 @@ fun EditorScreen(
         }
     }
 
+    // Sync optional Manual Keyboard Block mode to WebView
+    LaunchedEffect(isWebReady, userSettings.blockAutoKeyboard) {
+        if (isWebReady) {
+            webViewRef?.evaluateJavascript(
+                "window.KannadaDocEditor && window.KannadaDocEditor.setManualKeyboardBlock(${userSettings.blockAutoKeyboard});",
+                null
+            )
+        }
+    }
+
+    // Auto-focus & open keyboard when Find & Replace bar opens (unless Manual Block Mode is ON)
+    LaunchedEffect(showFindBar) {
+        if (showFindBar) {
+            delay(120)
+            if (!userSettings.blockAutoKeyboard) {
+                runCatching { findFocusRequester.requestFocus() }
+                softwareKeyboardController?.show()
+            } else {
+                softwareKeyboardController?.hide()
+            }
+        }
+    }
+
     // Configurable Auto-Save file timer (default 10 minutes) — saves automatically when dirty
     LaunchedEffect(isWebReady, uiState.isDirty, uiState.isOriginalView, userSettings.autoSaveIntervalMinutes, userSettings.defaultSaveFormat) {
         if (isWebReady && uiState.isDirty && !uiState.isOriginalView) {
@@ -242,6 +278,7 @@ fun EditorScreen(
             val jsDraftArg = JSONObject.quote(uiState.savedDraftHtml ?: "")
             webViewRef?.evaluateJavascript(
                 "window.KannadaDocEditor.setDarkTheme(${userSettings.isDarkTheme});" +
+                    "window.KannadaDocEditor.setManualKeyboardBlock(${userSettings.blockAutoKeyboard});" +
                     "window.KannadaDocEditor.setFontSize(${uiState.fontSizePt});" +
                     "window.KannadaDocEditor.loadDocument($jsDocArg, $jsConvArg, $jsDraftArg);",
                 null
@@ -273,9 +310,7 @@ fun EditorScreen(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .statusBarsPadding()
+                    modifier = Modifier.fillMaxWidth()
                 ) {
                     AnimatedVisibility(visible = !showKannadaKeyboard) {
                         Row(
@@ -389,6 +424,19 @@ fun EditorScreen(
                                     showOverflowMenu = false
                                     chosenEncoding = null
                                     pendingExportAction = ExportAction.SAVE_COPY
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        if (knOnly) "ದಾಖಲೆ ಫಾರ್ಮ್ಯಾಟ್ ಬದಲಿಸಿ"
+                                        else "Change Document Type"
+                                    )
+                                },
+                                leadingIcon = { Icon(Icons.Default.SwapHoriz, null) },
+                                onClick = {
+                                    showOverflowMenu = false
+                                    showChangeDocTypeDialog = true
                                 }
                             )
                             HorizontalDivider()
@@ -536,6 +584,7 @@ fun EditorScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                .imePadding()
         ) {
             val viewportWidth = maxWidth
             val viewportHeight = maxHeight
@@ -655,7 +704,9 @@ fun EditorScreen(
                                 keyboardActions = KeyboardActions(
                                     onSearch = { execJs("window.KannadaDocEditor.findNext();") }
                                 ),
-                                modifier = Modifier.weight(1f)
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .focusRequester(findFocusRequester)
                             )
 
                             Text(
@@ -834,10 +885,11 @@ fun EditorScreen(
                         stableWebViewSlot()
 
                         if (!uiState.isLoading && !uiState.isOriginalView && !showKannadaKeyboard) {
-                            FloatingKeyboardToggleButton(
+                            FloatingKeyboardActionButtons(
                                 anchor = keyboardAnchor,
+                                isSystemKeyboardOpen = isSystemKeyboardOpen,
                                 onAnchorChange = { keyboardAnchor = it },
-                                onOpenKeyboard = {
+                                onOpenKannadaKeyboard = {
                                     showKannadaKeyboard = true
                                     softwareKeyboardController?.hide()
                                     webViewRef?.let { wv ->
@@ -845,6 +897,34 @@ fun EditorScreen(
                                         imm?.hideSoftInputFromWindow(wv.windowToken, 0)
                                     }
                                     execJs("window.KannadaDocEditor && window.KannadaDocEditor.setVirtualKeyboardMode(true, $isTabletSideMode, 0);")
+                                },
+                                onToggleSystemKeyboard = {
+                                    val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+                                    if (isSystemKeyboardOpen) {
+                                        // Tap again -> Close the default OS keyboard cleanly
+                                        softwareKeyboardController?.hide()
+                                        webViewRef?.let { wv ->
+                                            imm?.hideSoftInputFromWindow(wv.windowToken, 0)
+                                            wv.clearFocus()
+                                        }
+                                        execJs("window.KannadaDocEditor && window.KannadaDocEditor.dismissSystemKeyboard();")
+                                    } else {
+                                        // Open the default OS keyboard at the cursor
+                                        showKannadaKeyboard = false
+                                        execJs("window.KannadaDocEditor && window.KannadaDocEditor.focusForSystemKeyboard();")
+                                        webViewRef?.let { wv ->
+                                            wv.requestFocus()
+                                            wv.postDelayed({
+                                                imm?.showSoftInput(wv, InputMethodManager.SHOW_IMPLICIT)
+                                            }, 90L)
+                                        }
+                                        softwareKeyboardController?.show()
+                                    }
+                                },
+                                onPickSystemKeyboard = {
+                                    // Long-press -> Show Android's system Input Method Picker (switch keyboards)
+                                    val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+                                    imm?.showInputMethodPicker()
                                 }
                             )
                         }
@@ -1133,6 +1213,33 @@ fun EditorScreen(
                         )
                     }
 
+                    HorizontalDivider()
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                            Text(
+                                text = if (knOnly) "ಸ್ವಯಂ ಕೀಬೋರ್ಡ್ ನಿರ್ಬಂಧಿಸಿ" else "Block Auto-Opening Keyboards",
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                            Text(
+                                text = if (knOnly) "ಬಳಕೆದಾರರು ಕೀಬೋರ್ಡ್ ಬಟನ್ ಒತ್ತಿದಾಗ ಮಾತ್ರ ತೆರೆಯುತ್ತದೆ"
+                                else "Prevent keyboards from popping up automatically; use the manual trigger buttons instead",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = userSettings.blockAutoKeyboard,
+                            onCheckedChange = onBlockAutoKeyboardChange
+                        )
+                    }
+
+                    HorizontalDivider()
+
                     OutlinedButton(
                         onClick = {
                             val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
@@ -1149,6 +1256,109 @@ fun EditorScreen(
             confirmButton = {
                 Button(onClick = { showSettingsDialog = false }) {
                     Text(if (knOnly) "ಮುಗಿಯಿತು" else "Done")
+                }
+            }
+        )
+    }
+
+    // Change Document Type Dialog (disables the format the document is already in)
+    if (showChangeDocTypeDialog) {
+        val currentEnc = uiState.documentInfo.currentEncoding
+        AlertDialog(
+            onDismissRequest = { showChangeDocTypeDialog = false },
+            title = {
+                Text(if (knOnly) "ದಾಖಲೆ ಫಾರ್ಮ್ಯಾಟ್ ಬದಲಿಸಿ" else "Change Document Type")
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = if (knOnly) "ಈ ದಾಖಲೆಯನ್ನು ಕೆಳಗಿನ ಯಾವ ಫಾರ್ಮ್ಯಾಟ್‌ಗೆ ಪರಿವರ್ತಿಸಬೇಕು?"
+                        else "Convert this document into another Kannada format:",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    KannadaEncodingChoice.entries.forEach { enc ->
+                        val isAlreadyInFormat = (currentEnc == enc)
+                        Surface(
+                            onClick = {
+                                if (!isAlreadyInFormat) {
+                                    showChangeDocTypeDialog = false
+                                    pendingConvertTarget = enc
+                                }
+                            },
+                            enabled = !isAlreadyInFormat,
+                            shape = MaterialTheme.shapes.medium,
+                            color = if (isAlreadyInFormat) {
+                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                            } else {
+                                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Text(
+                                    text = if (knOnly) enc.labelKn else "${enc.labelEn} • ${enc.labelKn}",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = if (isAlreadyInFormat) {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurface
+                                    }
+                                )
+                                if (isAlreadyInFormat) {
+                                    Text(
+                                        text = if (knOnly) "ದಾಖಲೆ ಈಗಾಗಲೇ ಈ ಫಾರ್ಮ್ಯಾಟ್‌ನಲ್ಲಿದೆ"
+                                        else "Document is already in this format",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showChangeDocTypeDialog = false }) {
+                    Text(if (knOnly) "ರದ್ದು" else "Cancel")
+                }
+            }
+        )
+    }
+
+    // Confirmation Dialog for Change Document Type (mutation confirmation)
+    pendingConvertTarget?.let { targetEnc ->
+        AlertDialog(
+            onDismissRequest = { pendingConvertTarget = null },
+            title = {
+                Text(if (knOnly) "ಫಾರ್ಮ್ಯಾಟ್ ಬದಲಿಸಬೇಕೇ?" else "Convert Document to ${targetEnc.labelEn}?")
+            },
+            text = {
+                Text(
+                    text = if (knOnly) {
+                        "ಈ ದಾಖಲೆಯನ್ನು ${targetEnc.labelKn} (.docx) ಫಾರ್ಮ್ಯಾಟ್‌ಗೆ ಪರಿವರ್ತಿಸಿ ಉಳಿಸಲಾಗುತ್ತದೆ ಮತ್ತು ಇತ್ತೀಚಿನ ಫೈಲ್‌ಗಳಲ್ಲಿ ತೋರಿಸಲಾಗುತ್ತದೆ."
+                    } else {
+                        "Convert and save this document in ${targetEnc.labelEn} (.docx) format? The converted file will also appear in Recent Files."
+                    },
+                    style = MaterialTheme.typography.bodyLarge
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    val mode = "convert_doc_${targetEnc.id}"
+                    pendingConvertTarget = null
+                    execJs("window.KannadaDocEditor.requestExport('$mode', false);")
+                }) {
+                    Text(if (knOnly) "ಪರಿವರ್ತಿಸಿ" else "Convert")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingConvertTarget = null }) {
+                    Text(if (knOnly) "ರದ್ದು" else "Cancel")
                 }
             }
         )
@@ -1234,6 +1444,8 @@ private fun EditorWebViewHost(
     onEditorError: (String) -> Unit
 ) {
     val context = LocalContext.current
+    val density = LocalDensity.current
+    val isSystemKeyboardOpen = WindowInsets.ime.getBottom(density) > 0
     val softwareKeyboardController = LocalSoftwareKeyboardController.current
     val assetLoader = remember(context) {
         WebViewAssetLoader.Builder()
@@ -1250,8 +1462,11 @@ private fun EditorWebViewHost(
                     domStorageEnabled = true
                     allowFileAccess = false
                     allowContentAccess = false
-                    builtInZoomControls = false
+                    setSupportZoom(true)
+                    builtInZoomControls = true
                     displayZoomControls = false
+                    useWideViewPort = true
+                    loadWithOverviewMode = false
                     cacheMode = WebSettings.LOAD_NO_CACHE
                 }
 

@@ -2,24 +2,17 @@
 <html lang="kn">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=2.0" />
-  <title>KannadaDoc Editor</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=0.5, maximum-scale=4.0, user-scalable=yes" />
+  <title>Kadata Editor</title>
   <link rel="stylesheet" href="editor.css" />
 </head>
 <body>
   <div id="desk">
     <div id="original-banner" class="hidden">
-      Read-Only Original Legacy View (Raw Document Text &amp; Font Tags)
+      Viewing Original Document (Read-Only) • ಮೂಲ ದಾಖಲೆ (ಓದಲು ಮಾತ್ರ)
     </div>
-    <article
-      id="paper"
-      contenteditable="true"
-      spellcheck="false"
-      autocorrect="off"
-      data-placeholder="ಇಲ್ಲಿ ಬರೆಯಲು ಪ್ರಾರಂಭಿಸಿ... / Start typing here..."
-    ></article>
+    <div id="paper" contenteditable="true" spellcheck="false" data-placeholder="ಇಲ್ಲಿ ಬರೆಯಿರಿ... / Start typing here..."></div>
   </div>
-
   <script src="kannada-converter.js"></script>
   <script src="editor.js"></script>
 </body>

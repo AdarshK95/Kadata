@@ -18,6 +18,11 @@ enum class AppLanguage {
     KANNADA  // Full Kannada UI labels
 }
 
+enum class HomeViewMode {
+    GRID,
+    DETAILS_LIST
+}
+
 enum class DefaultSaveFormat(
     val displayName: String,
     val displayNameKn: String,
@@ -31,7 +36,7 @@ enum class DefaultSaveFormat(
         displayNameKn = "ನುಡಿ (PC .docx)",
         subtitle = "Best for colleagues using Nudi on Windows (English stays Calibri)",
         subtitleKn = "ಕಂಪ್ಯೂಟರ್‌ನಲ್ಲಿ ನುಡಿ ಬಳಸುವವರಿಗೆ ಸೂಕ್ತ",
-        shortLabel = "Nudi (PC)",
+        shortLabel = "Nudi",
         jsExportMode = "save_default_nudi"
     ),
     BARAHA_PC(
@@ -39,7 +44,7 @@ enum class DefaultSaveFormat(
         displayNameKn = "ಬರಹ (PC .docx)",
         subtitle = "Best for colleagues using Baraha / BRH Kannada on Windows",
         subtitleKn = "ಕಂಪ್ಯೂಟರ್‌ನಲ್ಲಿ ಬರಹ ಬಳಸುವವರಿಗೆ ಸೂಕ್ತ",
-        shortLabel = "Baraha (PC)",
+        shortLabel = "Baraha",
         jsExportMode = "save_default_baraha"
     ),
     UNICODE(
@@ -47,7 +52,7 @@ enum class DefaultSaveFormat(
         displayNameKn = "ಆಧುನಿಕ ಯೂನಿಕೋಡ್ (.docx)",
         subtitle = "Standard Unicode Kannada (Google Docs, phones, newer Word)",
         subtitleKn = "ಗೂಗಲ್ ಡಾಕ್ಸ್, ಮೊಬೈಲ್ ಮತ್ತು ಹೊಸ ವರ್ಡ್‌ಗೆ ಸೂಕ್ತ",
-        shortLabel = "Unicode",
+        shortLabel = "Modern",
         jsExportMode = "save_default_unicode"
     )
 }
@@ -57,7 +62,9 @@ data class UserSettings(
     val appLanguage: AppLanguage = AppLanguage.ENGLISH,
     val defaultFontSizePt: Int = 18,
     val defaultSaveFormat: DefaultSaveFormat = DefaultSaveFormat.NUDI_PC,
-    val autoSaveIntervalMinutes: Int = 10
+    val autoSaveIntervalMinutes: Int = 10,
+    val blockAutoKeyboard: Boolean = false,
+    val homeViewMode: HomeViewMode = HomeViewMode.GRID
 ) {
     val isDarkTheme: Boolean get() = themeMode == AppThemeMode.DARK
     val isKannadaUi: Boolean get() = appLanguage == AppLanguage.KANNADA
@@ -65,9 +72,13 @@ data class UserSettings(
 
 class AppPreferences(context: Context) {
     private val prefs = context.getSharedPreferences("kannadadoc_prefs", Context.MODE_PRIVATE)
+    private val formatPrefs = context.getSharedPreferences("kadata_doc_formats", Context.MODE_PRIVATE)
 
     private val _settings = MutableStateFlow(loadSettings())
     val settings: StateFlow<UserSettings> = _settings.asStateFlow()
+
+    private val _documentFormatMap = MutableStateFlow(loadFormatMap())
+    val documentFormatMap: StateFlow<Map<String, String>> = _documentFormatMap.asStateFlow()
 
     private fun loadSettings(): UserSettings {
         val themeName = prefs.getString(KEY_THEME_MODE, AppThemeMode.LIGHT.name)
@@ -82,6 +93,10 @@ class AppPreferences(context: Context) {
         val format = runCatching { DefaultSaveFormat.valueOf(savedFormatName ?: "") }
             .getOrDefault(DefaultSaveFormat.NUDI_PC)
 
+        val viewModeName = prefs.getString(KEY_HOME_VIEW_MODE, HomeViewMode.GRID.name)
+        val viewMode = runCatching { HomeViewMode.valueOf(viewModeName ?: "") }
+            .getOrDefault(HomeViewMode.GRID)
+
         val autoSaveMin = prefs.getInt(KEY_AUTOSAVE_MINUTES, 10).coerceIn(1, 60)
 
         return UserSettings(
@@ -89,8 +104,36 @@ class AppPreferences(context: Context) {
             appLanguage = language,
             defaultFontSizePt = prefs.getInt(KEY_FONT_SIZE, 18).coerceIn(14, 32),
             defaultSaveFormat = format,
-            autoSaveIntervalMinutes = autoSaveMin
+            autoSaveIntervalMinutes = autoSaveMin,
+            blockAutoKeyboard = prefs.getBoolean(KEY_BLOCK_AUTO_KB, false),
+            homeViewMode = viewMode
         )
+    }
+
+    private fun loadFormatMap(): Map<String, String> {
+        val result = mutableMapOf<String, String>()
+        for ((k, v) in formatPrefs.all) {
+            if (v is String && v.isNotBlank()) {
+                result[k] = v
+            }
+        }
+        return result
+    }
+
+    fun setDocumentFormatTag(uriString: String, formatTag: String) {
+        if (uriString.isBlank() || formatTag.isBlank()) return
+        formatPrefs.edit().putString(uriString, formatTag).apply()
+        val updated = _documentFormatMap.value.toMutableMap()
+        updated[uriString] = formatTag
+        _documentFormatMap.value = updated
+    }
+
+    fun removeDocumentFormatTag(uriString: String) {
+        if (uriString.isBlank()) return
+        formatPrefs.edit().remove(uriString).apply()
+        val updated = _documentFormatMap.value.toMutableMap()
+        updated.remove(uriString)
+        _documentFormatMap.value = updated
     }
 
     fun setThemeMode(mode: AppThemeMode) {
@@ -129,11 +172,25 @@ class AppPreferences(context: Context) {
         _settings.value = _settings.value.copy(autoSaveIntervalMinutes = clamped)
     }
 
-    /**
-     * Returns true only on the first cold open of the current calendar day (local timezone).
-     * Immediately marks today as shown so resuming from background or reopening later today
-     * skips the 1.5s splash screen.
-     */
+    fun setBlockAutoKeyboard(blocked: Boolean) {
+        prefs.edit().putBoolean(KEY_BLOCK_AUTO_KB, blocked).apply()
+        _settings.value = _settings.value.copy(blockAutoKeyboard = blocked)
+    }
+
+    fun toggleHomeViewMode() {
+        val next = if (_settings.value.homeViewMode == HomeViewMode.GRID) {
+            HomeViewMode.DETAILS_LIST
+        } else {
+            HomeViewMode.GRID
+        }
+        setHomeViewMode(next)
+    }
+
+    fun setHomeViewMode(mode: HomeViewMode) {
+        prefs.edit().putString(KEY_HOME_VIEW_MODE, mode.name).apply()
+        _settings.value = _settings.value.copy(homeViewMode = mode)
+    }
+
     fun consumeDailySplashIfDue(): Boolean {
         val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
         val lastShown = prefs.getString(KEY_LAST_SPLASH_DATE, null)
@@ -149,6 +206,8 @@ class AppPreferences(context: Context) {
         private const val KEY_SAVE_FORMAT = "default_save_format"
         private const val KEY_AUTOSAVE_MINUTES = "autosave_interval_minutes"
         private const val KEY_LAST_SPLASH_DATE = "last_daily_splash_date"
+        private const val KEY_BLOCK_AUTO_KB = "block_auto_keyboard"
+        private const val KEY_HOME_VIEW_MODE = "home_view_mode"
 
         val AUTO_SAVE_OPTIONS_MINUTES = listOf(1, 2, 5, 10, 15, 30)
     }

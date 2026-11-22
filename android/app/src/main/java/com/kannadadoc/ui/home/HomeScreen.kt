@@ -22,7 +22,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items as listItems
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -34,11 +35,13 @@ import androidx.compose.material.icons.filled.AddCircle
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Translate
+import androidx.compose.material.icons.filled.ViewList
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -61,6 +64,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -74,7 +78,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -84,6 +91,7 @@ import com.kannadadoc.R
 import com.kannadadoc.data.local.AppPreferences
 import com.kannadadoc.data.local.AppThemeMode
 import com.kannadadoc.data.local.DefaultSaveFormat
+import com.kannadadoc.data.local.HomeViewMode
 import com.kannadadoc.data.local.RecentFileEntity
 import com.kannadadoc.data.local.UserSettings
 import com.kannadadoc.data.storage.FileLocationHelper
@@ -102,6 +110,7 @@ import java.util.Locale
 @Composable
 fun HomeScreen(
     recentFiles: List<RecentFileEntity>,
+    documentFormatMap: Map<String, String>,
     selectedFilter: LibraryFilter,
     uiState: HomeUiState,
     userSettings: UserSettings,
@@ -125,6 +134,8 @@ fun HomeScreen(
     onThemeModeChange: (AppThemeMode) -> Unit,
     onSaveFormatChange: (DefaultSaveFormat) -> Unit,
     onAutoSaveIntervalChange: (Int) -> Unit,
+    onBlockAutoKeyboardChange: (Boolean) -> Unit,
+    onToggleViewMode: () -> Unit,
     onFontSizeChange: (Int) -> Unit,
     onShowInfo: (String) -> Unit,
     onErrorShown: () -> Unit,
@@ -132,6 +143,7 @@ fun HomeScreen(
     onDismissUnsupportedAlert: () -> Unit
 ) {
     val context = LocalContext.current
+    val keyboardController = LocalSoftwareKeyboardController.current
     val snackbarHostState = remember { SnackbarHostState() }
     val knOnly = userSettings.isKannadaUi
 
@@ -245,7 +257,6 @@ fun HomeScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .statusBarsPadding()
                             .height(46.dp)
                             .padding(horizontal = 14.dp),
                         verticalAlignment = Alignment.CenterVertically
@@ -375,14 +386,40 @@ fun HomeScreen(
 
                 Spacer(Modifier.height(10.dp))
 
-                Text(
-                    text = if (knOnly) "ಇತ್ತೀಚಿನ ಫೈಲ್‌ಗಳು" else "Recent Files • ಇತ್ತೀಚಿನ ಫೈಲ್‌ಗಳು",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onBackground,
-                    modifier = Modifier.padding(horizontal = 14.dp)
-                )
-                Spacer(Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = if (knOnly) "ಇತ್ತೀಚಿನ ಫೈಲ್‌ಗಳು" else "Recent Files • ಇತ್ತೀಚಿನ ಫೈಲ್‌ಗಳು",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onBackground
+                    )
+                    IconButton(
+                        onClick = onToggleViewMode,
+                        modifier = Modifier.size(34.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (userSettings.homeViewMode == HomeViewMode.GRID) {
+                                Icons.Default.ViewList
+                            } else {
+                                Icons.Default.GridView
+                            },
+                            contentDescription = if (userSettings.homeViewMode == HomeViewMode.GRID) {
+                                "Switch to Details List View"
+                            } else {
+                                "Switch to Grid View"
+                            },
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
 
                 if (uiState.isLoading) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -405,16 +442,72 @@ fun HomeScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
+                } else if (userSettings.homeViewMode == HomeViewMode.DETAILS_LIST) {
+                    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                        val isWideTable = maxWidth >= 520.dp
+                        Column(modifier = Modifier.fillMaxSize()) {
+                            if (isWideTable) {
+                                DetailsListColumnHeader(knOnly = knOnly)
+                            }
+                            LazyColumn(
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                                contentPadding = PaddingValues(
+                                    start = 14.dp,
+                                    end = 14.dp,
+                                    top = if (isWideTable) 4.dp else 0.dp,
+                                    bottom = 20.dp
+                                ),
+                                modifier = Modifier.fillMaxSize()
+                            ) {
+                                listItems(recentFiles, key = { it.uriString }) { file ->
+                                    RecentFileDetailsRow(
+                                        entity = file,
+                                        kannadaFormatTag = resolveDisplayFormatTag(file, documentFormatMap),
+                                        isWideTable = isWideTable,
+                                        knOnly = knOnly,
+                                        isDarkTheme = userSettings.isDarkTheme,
+                                        onClick = { onRecentFileClick(file) },
+                                        onOpenLocationClick = {
+                                            when (val res = FileLocationHelper.openFileLocation(context, file)) {
+                                                FileLocationResult.Opened -> Unit
+                                                is FileLocationResult.InfoMessage -> {
+                                                    onShowInfo(if (knOnly) res.messageKn else res.messageEn)
+                                                }
+                                            }
+                                        },
+                                        onShareAsIsClick = { onShareRecentFileAsIs(file) },
+                                        onShareDifferentFormatClick = {
+                                            cardExportTarget = file
+                                            cardChosenEncoding = null
+                                            cardExportAction = ExportAction.SHARE_DIFFERENT
+                                        },
+                                        onSaveAsClick = {
+                                            cardExportTarget = file
+                                            cardChosenEncoding = null
+                                            cardExportAction = ExportAction.SAVE_COPY
+                                        },
+                                        onRenameClick = {
+                                            renameText = file.displayName
+                                            filePendingRename = file
+                                        },
+                                        onDeleteClick = { filePendingDelete = file }
+                                    )
+                                }
+                            }
+                        }
+                    }
                 } else {
                     LazyVerticalGrid(
-                        columns = GridCells.Adaptive(minSize = 320.dp),
-                        horizontalArrangement = Arrangement.spacedBy(14.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        columns = GridCells.Adaptive(minSize = 310.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
                         contentPadding = PaddingValues(start = 14.dp, end = 14.dp, bottom = 20.dp)
                     ) {
                         items(recentFiles, key = { it.uriString }) { file ->
                             RecentFileCard(
                                 entity = file,
+                                kannadaFormatTag = resolveDisplayFormatTag(file, documentFormatMap),
+                                isDetailsMode = false,
                                 knOnly = knOnly,
                                 isDarkTheme = userSettings.isDarkTheme,
                                 onClick = { onRecentFileClick(file) },
@@ -506,8 +599,16 @@ fun HomeScreen(
         )
     }
 
-    // New Blank Document Dialog
+    // New Blank Document Dialog (auto-opens keyboard unless Manual Block Mode is ON)
     if (showNewDocDialog) {
+        val newDocFocusRequester = remember { FocusRequester() }
+        LaunchedEffect(Unit) {
+            if (!userSettings.blockAutoKeyboard) {
+                kotlinx.coroutines.delay(140)
+                runCatching { newDocFocusRequester.requestFocus() }
+                keyboardController?.show()
+            }
+        }
         AlertDialog(
             onDismissRequest = { showNewDocDialog = false },
             title = { Text(if (knOnly) "ಹೊಸ ದಾಖಲೆ" else "New Document • ಹೊಸ ದಾಖಲೆ") },
@@ -517,7 +618,9 @@ fun HomeScreen(
                     onValueChange = { newDocTitle = it },
                     label = { Text(if (knOnly) "ದಾಖಲೆಯ ಹೆಸರು" else "Document Name • ಹೆಸರು") },
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusRequester(newDocFocusRequester)
                 )
             },
             confirmButton = {
@@ -536,8 +639,16 @@ fun HomeScreen(
         )
     }
 
-    // Rename Document Dialog
+    // Rename Document Dialog (auto-opens keyboard unless Manual Block Mode is ON)
     filePendingRename?.let { target ->
+        val renameFocusRequester = remember { FocusRequester() }
+        LaunchedEffect(target.uriString) {
+            if (!userSettings.blockAutoKeyboard) {
+                kotlinx.coroutines.delay(140)
+                runCatching { renameFocusRequester.requestFocus() }
+                keyboardController?.show()
+            }
+        }
         AlertDialog(
             onDismissRequest = { filePendingRename = null },
             title = { Text(if (knOnly) "ಹೆಸರು ಬದಲಿಸಿ" else "Rename Document • ಹೆಸರು ಬದಲಿಸಿ") },
@@ -547,7 +658,9 @@ fun HomeScreen(
                     onValueChange = { renameText = it },
                     label = { Text(if (knOnly) "ಹೊಸ ಹೆಸರು" else "New Name • ಹೊಸ ಹೆಸರು") },
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusRequester(renameFocusRequester)
                 )
             },
             confirmButton = {
@@ -712,6 +825,33 @@ fun HomeScreen(
                         )
                     }
 
+                    HorizontalDivider()
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                            Text(
+                                text = if (knOnly) "ಸ್ವಯಂ ಕೀಬೋರ್ಡ್ ನಿರ್ಬಂಧಿಸಿ" else "Block Auto-Opening Keyboards",
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                            Text(
+                                text = if (knOnly) "ಬಳಕೆದಾರರು ಕೀಬೋರ್ಡ್ ಬಟನ್ ಒತ್ತಿದಾಗ ಮಾತ್ರ ತೆರೆಯುತ್ತದೆ"
+                                else "Prevent keyboards from popping up automatically; use the manual trigger buttons instead",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = userSettings.blockAutoKeyboard,
+                            onCheckedChange = onBlockAutoKeyboardChange
+                        )
+                    }
+
+                    HorizontalDivider()
+
                     OutlinedButton(
                         onClick = {
                             val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
@@ -795,9 +935,110 @@ private fun PrimaryActionCard(
     }
 }
 
-@Composable
-private fun RecentFileCard(
+private fun formatFileSizeLabel(bytes: Long): String {
+    if (bytes < 0L) return "—"
+    if (bytes == 0L) return "0 B"
+    return when {
+        bytes < 1024L -> "$bytes B"
+        bytes < 1024L * 1024L -> {
+            val kb = bytes / 1024.0
+            if (kb < 10.0) String.format(Locale.US, "%.1f KB", kb) else "${kb.toInt()} KB"
+        }
+        else -> String.format(Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0))
+    }
+}
+
+private fun resolveDisplayFormatTag(
     entity: RecentFileEntity,
+    formatMap: Map<String, String>
+): String {
+    formatMap[entity.uriString]?.takeIf { it.isNotBlank() && it != "PDF" }?.let { return it }
+    entity.savedUnicodeUri?.let { saved ->
+        formatMap[saved]?.takeIf { it.isNotBlank() && it != "PDF" }?.let { return it }
+    }
+    val name = entity.displayName
+    return when {
+        name.contains("_Nudi", ignoreCase = true) -> "Nudi"
+        name.contains("_Baraha", ignoreCase = true) -> "Baraha"
+        name.contains("_Unicode", ignoreCase = true) -> "Modern"
+        entity.converterOverride.equals("nudi", ignoreCase = true) -> "Nudi"
+        entity.converterOverride.equals("baraha", ignoreCase = true) -> "Baraha"
+        else -> "Modern"
+    }
+}
+
+private fun localizeFormatTag(rawTag: String, knOnly: Boolean): String =
+    when (rawTag) {
+        "Nudi" -> if (knOnly) "ನುಡಿ" else "Nudi"
+        "Baraha" -> if (knOnly) "ಬರಹ" else "Baraha"
+        "Modern" -> if (knOnly) "ಆಧುನಿಕ" else "Modern"
+        "English" -> if (knOnly) "ಇಂಗ್ಲಿಷ್" else "English"
+        "Scanned" -> if (knOnly) "ಸ್ಕ್ಯಾನ್" else "Scanned"
+        else -> rawTag
+    }
+
+@Composable
+private fun DetailsListColumnHeader(knOnly: Boolean) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.85f),
+        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        shape = MaterialTheme.shapes.small,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 2.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 46.dp, end = 42.dp, top = 6.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = if (knOnly) "ಹೆಸರು" else "Name",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                text = if (knOnly) "ಪ್ರಕಾರ" else "Type",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.width(48.dp)
+            )
+            Text(
+                text = if (knOnly) "ಫಾರ್ಮ್ಯಾಟ್" else "Format",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.width(64.dp)
+            )
+            Text(
+                text = if (knOnly) "ಗಾತ್ರ" else "Size",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.width(58.dp)
+            )
+            Text(
+                text = if (knOnly) "ದಿನಾಂಕ" else "Modified",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.width(126.dp)
+            )
+            Text(
+                text = if (knOnly) "ಸ್ಥಿತಿ" else "Status",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.width(54.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun RecentFileDetailsRow(
+    entity: RecentFileEntity,
+    kannadaFormatTag: String,
+    isWideTable: Boolean,
     knOnly: Boolean,
     isDarkTheme: Boolean,
     onClick: () -> Unit,
@@ -808,17 +1049,16 @@ private fun RecentFileCard(
     onRenameClick: () -> Unit,
     onDeleteClick: () -> Unit
 ) {
-    var showCardMenu by remember { mutableStateOf(false) }
-
     val dateLabel = remember(entity.lastOpenedAt) {
-        SimpleDateFormat("dd MMM yyyy, hh:mm a", Locale.getDefault())
+        SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault())
             .format(Date(entity.lastOpenedAt))
     }
-
-    val statusHint = when {
+    val sizeLabel = remember(entity.fileSizeBytes) { formatFileSizeLabel(entity.fileSizeBytes) }
+    val formatLabel = localizeFormatTag(kannadaFormatTag, knOnly)
+    val statusLabel = when {
         entity.savedUnicodeUri != null -> if (knOnly) "ತಿದ್ದುಪಡಿ" else "Edited"
         entity.isLocallyImported -> if (knOnly) "ಆಫ್‌ಲೈನ್" else "Offline"
-        else -> null
+        else -> "—"
     }
 
     Card(
@@ -826,15 +1066,220 @@ private fun RecentFileCard(
             .fillMaxWidth()
             .clickable(onClick = onClick),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+            contentColor = MaterialTheme.colorScheme.onSurface
+        )
+    ) {
+        if (isWideTable) {
+            // Single-line horizontal details table row maximizing horizontal real estate
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FileTypeIcon(
+                    format = entity.detectedFormat,
+                    isDarkTheme = isDarkTheme
+                )
+                Text(
+                    text = entity.displayName,
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    text = entity.detectedFormat.name,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    softWrap = false,
+                    modifier = Modifier.width(48.dp)
+                )
+                Text(
+                    text = formatLabel,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                    softWrap = false,
+                    modifier = Modifier.width(64.dp)
+                )
+                Text(
+                    text = sizeLabel,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    softWrap = false,
+                    modifier = Modifier.width(58.dp)
+                )
+                Text(
+                    text = dateLabel,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.width(126.dp)
+                )
+                Text(
+                    text = statusLabel,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (entity.savedUnicodeUri != null) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    maxLines = 1,
+                    softWrap = false,
+                    modifier = Modifier.width(54.dp)
+                )
+                FileCardOverflowMenu(
+                    knOnly = knOnly,
+                    isDarkTheme = isDarkTheme,
+                    onOpenLocationClick = onOpenLocationClick,
+                    onShareAsIsClick = onShareAsIsClick,
+                    onShareDifferentFormatClick = onShareDifferentFormatClick,
+                    onSaveAsClick = onSaveAsClick,
+                    onRenameClick = onRenameClick,
+                    onDeleteClick = onDeleteClick
+                )
+            }
+        } else {
+            // Compact full-width phone list row (Line 1: Icon + Name + Size + ⋮; Line 2: Date left + Format/Status right)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 10.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                FileTypeIcon(
+                    format = entity.detectedFormat,
+                    isDarkTheme = isDarkTheme
+                )
+                Spacer(Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = entity.displayName,
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            text = sizeLabel,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                    Spacer(Modifier.height(2.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = dateLabel,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                        val rightMeta = listOfNotNull(
+                            entity.detectedFormat.name,
+                            formatLabel,
+                            statusLabel.takeUnless { it == "—" }
+                        ).joinToString(" • ")
+                        Text(
+                            text = rightMeta,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                FileCardOverflowMenu(
+                    knOnly = knOnly,
+                    isDarkTheme = isDarkTheme,
+                    onOpenLocationClick = onOpenLocationClick,
+                    onShareAsIsClick = onShareAsIsClick,
+                    onShareDifferentFormatClick = onShareDifferentFormatClick,
+                    onSaveAsClick = onSaveAsClick,
+                    onRenameClick = onRenameClick,
+                    onDeleteClick = onDeleteClick
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RecentFileCard(
+    entity: RecentFileEntity,
+    kannadaFormatTag: String,
+    isDetailsMode: Boolean,
+    knOnly: Boolean,
+    isDarkTheme: Boolean,
+    onClick: () -> Unit,
+    onOpenLocationClick: () -> Unit,
+    onShareAsIsClick: () -> Unit,
+    onShareDifferentFormatClick: () -> Unit,
+    onSaveAsClick: () -> Unit,
+    onRenameClick: () -> Unit,
+    onDeleteClick: () -> Unit
+) {
+    val dateLabel = remember(entity.lastOpenedAt) {
+        SimpleDateFormat("dd MMM yyyy, hh:mm a", Locale.getDefault())
+            .format(Date(entity.lastOpenedAt))
+    }
+    val sizeLabel = remember(entity.fileSizeBytes) { formatFileSizeLabel(entity.fileSizeBytes) }
+
+    val statusHint = when {
+        entity.savedUnicodeUri != null -> if (knOnly) "ತಿದ್ದುಪಡಿ" else "Edited"
+        entity.isLocallyImported -> if (knOnly) "ಆಫ್‌ಲೈನ್" else "Offline"
+        else -> null
+    }
+
+    val localizedFormatTag = localizeFormatTag(kannadaFormatTag, knOnly)
+
+    val line1Meta = "$dateLabel  •  $sizeLabel"
+    val line2Meta = listOfNotNull(entity.detectedFormat.name, localizedFormatTag, statusHint).joinToString("  •  ")
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.93f),
             contentColor = MaterialTheme.colorScheme.onSurface
         )
     ) {
         Row(
-            modifier = Modifier.padding(start = 14.dp, end = 6.dp, top = 12.dp, bottom = 12.dp),
+            modifier = Modifier.padding(
+                start = 12.dp,
+                end = 4.dp,
+                top = if (isDetailsMode) 10.dp else 11.dp,
+                bottom = if (isDetailsMode) 10.dp else 11.dp
+            ),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Compact, elegant distinct modern file-type icon (~50% smaller than old 36dp block icon)
             FileTypeIcon(
                 format = entity.detectedFormat,
                 isDarkTheme = isDarkTheme
@@ -848,134 +1293,137 @@ private fun RecentFileCard(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                Spacer(Modifier.height(3.dp))
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Text(
-                        text = dateLabel,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1
-                    )
-                    Text(
-                        text = "•",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Text(
-                        text = entity.detectedFormat.name,
-                        style = MaterialTheme.typography.bodySmall,
-                        fontWeight = FontWeight.Medium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    if (statusHint != null) {
-                        Text(
-                            text = "•",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Text(
-                            text = statusHint,
-                            style = MaterialTheme.typography.bodySmall,
-                            fontWeight = FontWeight.Medium,
-                            color = if (entity.savedUnicodeUri != null) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            }
-                        )
-                    }
-                }
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text = line1Meta,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(Modifier.height(1.dp))
+                Text(
+                    text = line2Meta,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
 
-            // Single 3-dot menu consolidating Open File Location, Share, Share Different Format, Save As, Rename, Delete
-            Box {
-                IconButton(
-                    onClick = { showCardMenu = true },
-                    modifier = Modifier.size(38.dp)
-                ) {
+            FileCardOverflowMenu(
+                knOnly = knOnly,
+                isDarkTheme = isDarkTheme,
+                onOpenLocationClick = onOpenLocationClick,
+                onShareAsIsClick = onShareAsIsClick,
+                onShareDifferentFormatClick = onShareDifferentFormatClick,
+                onSaveAsClick = onSaveAsClick,
+                onRenameClick = onRenameClick,
+                onDeleteClick = onDeleteClick
+            )
+        }
+    }
+}
+
+@Composable
+private fun FileCardOverflowMenu(
+    knOnly: Boolean,
+    isDarkTheme: Boolean,
+    onOpenLocationClick: () -> Unit,
+    onShareAsIsClick: () -> Unit,
+    onShareDifferentFormatClick: () -> Unit,
+    onSaveAsClick: () -> Unit,
+    onRenameClick: () -> Unit,
+    onDeleteClick: () -> Unit
+) {
+    var showCardMenu by remember { mutableStateOf(false) }
+
+    Box {
+        IconButton(
+            onClick = { showCardMenu = true },
+            modifier = Modifier.size(36.dp)
+        ) {
+            Icon(
+                Icons.Default.MoreVert,
+                contentDescription = "File options",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+
+        DropdownMenu(
+            expanded = showCardMenu,
+            onDismissRequest = { showCardMenu = false },
+            containerColor = if (isDarkTheme) Color.Black else MaterialTheme.colorScheme.surface
+        ) {
+            DropdownMenuItem(
+                text = {
+                    Text(if (knOnly) "ಫೈಲ್ ಸ್ಥಳ ತೆರೆಯಿರಿ" else "Open File Location")
+                },
+                leadingIcon = { Icon(Icons.Default.FolderOpen, null) },
+                onClick = {
+                    showCardMenu = false
+                    onOpenLocationClick()
+                }
+            )
+            HorizontalDivider()
+            DropdownMenuItem(
+                text = { Text(if (knOnly) "ಹಂಚಿಕೊಳ್ಳಿ" else "Share • ಹಂಚಿಕೊಳ್ಳಿ") },
+                leadingIcon = { Icon(Icons.Default.Share, null) },
+                onClick = {
+                    showCardMenu = false
+                    onShareAsIsClick()
+                }
+            )
+            DropdownMenuItem(
+                text = {
+                    Text(if (knOnly) "ಬೇರೆ ಫಾರ್ಮ್ಯಾಟ್ ಹಂಚಿಕೊಳ್ಳಿ" else "Share Different Format")
+                },
+                leadingIcon = { Icon(Icons.Default.Share, null) },
+                onClick = {
+                    showCardMenu = false
+                    onShareDifferentFormatClick()
+                }
+            )
+            DropdownMenuItem(
+                text = { Text(if (knOnly) "ಬೇರೆ ಪ್ರತಿಯಾಗಿ ಉಳಿಸಿ" else "Save As") },
+                leadingIcon = { Icon(Icons.Default.Save, null) },
+                onClick = {
+                    showCardMenu = false
+                    onSaveAsClick()
+                }
+            )
+            HorizontalDivider()
+            DropdownMenuItem(
+                text = { Text(if (knOnly) "ಹೆಸರು ಬದಲಿಸಿ" else "Rename") },
+                leadingIcon = { Icon(Icons.Default.Edit, null) },
+                onClick = {
+                    showCardMenu = false
+                    onRenameClick()
+                }
+            )
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        text = if (knOnly) "ತೆಗೆದುಹಾಕಿ" else "Delete",
+                        color = MaterialTheme.colorScheme.error
+                    )
+                },
+                leadingIcon = {
                     Icon(
-                        Icons.Default.MoreVert,
-                        contentDescription = "File options",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(20.dp)
+                        Icons.Default.DeleteOutline,
+                        null,
+                        tint = MaterialTheme.colorScheme.error
                     )
+                },
+                onClick = {
+                    showCardMenu = false
+                    onDeleteClick()
                 }
-
-                DropdownMenu(
-                    expanded = showCardMenu,
-                    onDismissRequest = { showCardMenu = false },
-                    containerColor = if (isDarkTheme) Color.Black else MaterialTheme.colorScheme.surface
-                ) {
-                    DropdownMenuItem(
-                        text = {
-                            Text(if (knOnly) "ಫೈಲ್ ಸ್ಥಳ ತೆರೆಯಿರಿ" else "Open File Location")
-                        },
-                        leadingIcon = { Icon(Icons.Default.FolderOpen, null) },
-                        onClick = {
-                            showCardMenu = false
-                            onOpenLocationClick()
-                        }
-                    )
-                    HorizontalDivider()
-                    DropdownMenuItem(
-                        text = { Text(if (knOnly) "ಹಂಚಿಕೊಳ್ಳಿ" else "Share • ಹಂಚಿಕೊಳ್ಳಿ") },
-                        leadingIcon = { Icon(Icons.Default.Share, null) },
-                        onClick = {
-                            showCardMenu = false
-                            onShareAsIsClick()
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = {
-                            Text(if (knOnly) "ಬೇರೆ ಫಾರ್ಮ್ಯಾಟ್ ಹಂಚಿಕೊಳ್ಳಿ" else "Share Different Format")
-                        },
-                        leadingIcon = { Icon(Icons.Default.Share, null) },
-                        onClick = {
-                            showCardMenu = false
-                            onShareDifferentFormatClick()
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text(if (knOnly) "ಬೇರೆ ಪ್ರತಿಯಾಗಿ ಉಳಿಸಿ" else "Save As") },
-                        leadingIcon = { Icon(Icons.Default.Save, null) },
-                        onClick = {
-                            showCardMenu = false
-                            onSaveAsClick()
-                        }
-                    )
-                    HorizontalDivider()
-                    DropdownMenuItem(
-                        text = { Text(if (knOnly) "ಹೆಸರು ಬದಲಿಸಿ" else "Rename") },
-                        leadingIcon = { Icon(Icons.Default.Edit, null) },
-                        onClick = {
-                            showCardMenu = false
-                            onRenameClick()
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = {
-                            Text(
-                                text = if (knOnly) "ತೆಗೆದುಹಾಕಿ" else "Delete",
-                                color = MaterialTheme.colorScheme.error
-                            )
-                        },
-                        leadingIcon = {
-                            Icon(
-                                Icons.Default.DeleteOutline,
-                                null,
-                                tint = MaterialTheme.colorScheme.error
-                            )
-                        },
-                        onClick = {
-                            showCardMenu = false
-                            onDeleteClick()
-                        }
-                    )
-                }
-            }
+            )
         }
     }
 }

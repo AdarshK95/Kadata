@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.kannadadoc.data.local.AppPreferences
 import com.kannadadoc.data.local.DraftDao
 import com.kannadadoc.data.local.DraftEntity
 import com.kannadadoc.data.local.RecentFileDao
@@ -38,28 +39,32 @@ enum class KannadaEncodingChoice(
     val labelEn: String,
     val labelKn: String,
     val suffix: String,
+    val shortBadge: String,
     val defaultFontForWord: String
 ) {
-    NUDI("nudi", "Nudi", "ನುಡಿ", "Nudi", "Calibri"),
-    BARAHA("baraha", "Baraha", "ಬರಹ", "Baraha", "Calibri"),
-    UNICODE("unicode", "Modern Unicode", "ಆಧುನಿಕ ಯೂನಿಕೋಡ್", "Unicode", "Noto Sans Kannada")
+    NUDI("nudi", "Nudi", "ನುಡಿ", "Nudi", "Nudi", "Calibri"),
+    BARAHA("baraha", "Baraha", "ಬರಹ", "Baraha", "Baraha", "Calibri"),
+    UNICODE("unicode", "Modern Unicode", "ಆಧುನಿಕ ಯೂನಿಕೋಡ್", "Unicode", "Modern", "Noto Sans Kannada")
 }
 
 enum class TargetFileType(
     val id: String,
     val extension: String,
     val label: String,
-    val mimeType: String
+    val mimeType: String,
+    val docFormat: DocFormat
 ) {
-    DOC("doc", "doc", ".doc (Word 97–2003)", "application/msword"),
-    DOCX("docx", "docx", ".docx (Word)", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
-    PDF("pdf", "pdf", ".pdf (PDF)", "application/pdf")
+    DOC("doc", "doc", ".doc (Word 97–2003)", "application/msword", DocFormat.DOC),
+    DOCX("docx", "docx", ".docx (Word)", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", DocFormat.DOCX),
+    PDF("pdf", "pdf", ".pdf (PDF)", "application/pdf", DocFormat.PDF)
 }
 
 data class DocumentInfo(
     val fileName: String = "",
     val fileFormat: DocFormat = DocFormat.DOCX,
-    val detectedEncodingLabel: String = "Unicode Kannada",
+    val detectedEncodingLabel: String = "Modern Unicode",
+    val currentEncoding: KannadaEncodingChoice? = null,
+    val shortFormatTag: String = "Modern",
     val fontFamiliesFound: List<String> = emptyList(),
     val hasLegacyKannada: Boolean = false,
     val hasUnicodeKannada: Boolean = false,
@@ -92,6 +97,7 @@ class EditorViewModel(
     private val storageManager: SafStorageManager,
     private val recentFileDao: RecentFileDao,
     private val draftDao: DraftDao,
+    private val preferences: AppPreferences,
     private val docxWriter: DocxWriter,
     private val rtfDocWriter: RtfDocWriter,
     private val pdfExporter: PdfExporter
@@ -115,6 +121,7 @@ class EditorViewModel(
     private var pendingSafSaveDoc: ParsedDocument? = null
     private var pendingSafEncoding: KannadaEncodingChoice = KannadaEncodingChoice.NUDI
     private var pendingSafFileType: TargetFileType = TargetFileType.DOCX
+    private var pendingSafSuggestedName: String = "Document.docx"
 
     fun loadExistingDocument(
         uri: Uri,
@@ -145,6 +152,7 @@ class EditorViewModel(
                 .onSuccess { parsed ->
                     val json = DocumentJson.toJson(parsed)
                     val info = inspectDocumentInfo(parsed)
+                    preferences.setDocumentFormatTag(uri.toString(), info.shortFormatTag)
                     _uiState.value = _uiState.value.copy(
                         isLoading = false,
                         parsedDocJson = json,
@@ -168,6 +176,9 @@ class EditorViewModel(
         viewModelScope.launch {
             val json = DocumentJson.toJson(parsed)
             val info = inspectDocumentInfo(parsed)
+            if (parsed.sourceUri.isNotBlank()) {
+                preferences.setDocumentFormatTag(parsed.sourceUri, info.shortFormatTag)
+            }
             _uiState.value = EditorUiState(
                 uriString = parsed.sourceUri,
                 documentTitle = parsed.fileName,
@@ -246,20 +257,6 @@ class EditorViewModel(
         _uiState.value = _uiState.value.copy(isOriginalView = enabled)
     }
 
-    fun selectConverter(converterId: String) {
-        val uriStr = _uiState.value.uriString
-        _uiState.value = _uiState.value.copy(
-            activeConverter = converterId,
-            isOriginalView = false,
-            isDirty = true
-        )
-        if (uriStr.isNotBlank()) {
-            viewModelScope.launch {
-                recentFileDao.updateConverterOverride(uriStr, converterId)
-            }
-        }
-    }
-
     fun onDraftChanged(html: String, idmJson: String) {
         val state = _uiState.value
         if (state.uriString.isBlank()) return
@@ -277,10 +274,6 @@ class EditorViewModel(
         }
     }
 
-    /**
-     * Shares the existing file as-is without converting to another format.
-     * Prefers the saved copy if this file was already saved; otherwise shares the original file.
-     */
     fun shareExistingFileAsIs() {
         val state = _uiState.value
         if (state.uriString.isBlank()) {
@@ -316,8 +309,9 @@ class EditorViewModel(
     /**
      * Handles exported IDM JSON from the WebView for:
      * - Default Save / Auto-Save (save_default_nudi / save_default_baraha / save_default_unicode)
-     * - 2-Step Share Different Format (share_<encoding>_<ext>)
-     * - 2-Step Save a Copy (savecopy_<encoding>_<ext>)
+     * - Change Document Type (convert_doc_nudi / convert_doc_baraha / convert_doc_unicode)
+     * - 2-Step Share Different Format (share_<encoding>_<ext>) — also registered in Recent Files!
+     * - 2-Step Save a Copy (savecopy_<encoding>_<ext>) — also registered in Recent Files!
      */
     fun handleExportPayload(
         exportMode: String,
@@ -338,7 +332,7 @@ class EditorViewModel(
                     // 1. Primary Save / Auto-Save modes
                     exportMode == "save_default_nudi" -> {
                         val targetFile = storageManager.resolveSavedDocxFile(title, "Nudi")
-                        writeInternalDocx(parsedDoc, targetFile, defaultFont = "Calibri")
+                        writeInternalDocx(parsedDoc, targetFile, defaultFont = "Calibri", formatTag = "Nudi")
                         markSaveComplete(
                             label = "Saved (Nudi)",
                             snackbar = if (isAutoSave) null else "Saved as ${targetFile.name} (Nudi)"
@@ -347,7 +341,7 @@ class EditorViewModel(
 
                     exportMode == "save_default_baraha" -> {
                         val targetFile = storageManager.resolveSavedDocxFile(title, "Baraha")
-                        writeInternalDocx(parsedDoc, targetFile, defaultFont = "Calibri")
+                        writeInternalDocx(parsedDoc, targetFile, defaultFont = "Calibri", formatTag = "Baraha")
                         markSaveComplete(
                             label = "Saved (Baraha)",
                             snackbar = if (isAutoSave) null else "Saved as ${targetFile.name} (Baraha)"
@@ -356,17 +350,75 @@ class EditorViewModel(
 
                     exportMode == "save_default_unicode" || exportMode == "save_internal" -> {
                         val targetFile = storageManager.resolveSavedDocxFile(title, "Unicode")
-                        writeInternalDocx(parsedDoc, targetFile, defaultFont = "Noto Sans Kannada")
+                        writeInternalDocx(parsedDoc, targetFile, defaultFont = "Noto Sans Kannada", formatTag = "Modern")
                         markSaveComplete(
-                            label = "Saved (Unicode)",
-                            snackbar = if (isAutoSave) null else "Saved as ${targetFile.name} (Unicode)"
+                            label = "Saved (Modern)",
+                            snackbar = if (isAutoSave) null else "Saved as ${targetFile.name} (Modern Unicode)"
                         )
                     }
 
-                    // 2. Two-step Share Different Format: share_<encoding>_<ext>
+                    // 2. Change Document Type (auto-convert current document to Nudi / Baraha / Modern Unicode)
+                    exportMode.startsWith("convert_doc_") -> {
+                        val targetEnc = when (exportMode.removePrefix("convert_doc_")) {
+                            "nudi" -> KannadaEncodingChoice.NUDI
+                            "baraha" -> KannadaEncodingChoice.BARAHA
+                            else -> KannadaEncodingChoice.UNICODE
+                        }
+                        val outFile = storageManager.resolvePersistentExportFile(base, targetEnc.suffix, "docx")
+                        withContext(Dispatchers.IO) {
+                            FileOutputStream(outFile).use { fos ->
+                                docxWriter.write(parsedDoc, fos, defaultFont = targetEnc.defaultFontForWord)
+                            }
+                        }
+                        val registered = storageManager.registerExportedFile(
+                            file = outFile,
+                            displayName = outFile.name,
+                            format = DocFormat.DOCX,
+                            mimeType = TargetFileType.DOCX.mimeType
+                        )
+                        preferences.setDocumentFormatTag(registered.uriString, targetEnc.shortBadge)
+                        if (_uiState.value.uriString.isNotBlank()) {
+                            preferences.setDocumentFormatTag(_uiState.value.uriString, targetEnc.shortBadge)
+                        }
+                        val updatedInfo = _uiState.value.documentInfo.copy(
+                            fileName = outFile.name,
+                            fileFormat = DocFormat.DOCX,
+                            detectedEncodingLabel = when (targetEnc) {
+                                KannadaEncodingChoice.NUDI -> "Nudi (Legacy ASCII)"
+                                KannadaEncodingChoice.BARAHA -> "Baraha (BRH Kannada)"
+                                KannadaEncodingChoice.UNICODE -> "Modern Unicode"
+                            },
+                            currentEncoding = targetEnc,
+                            shortFormatTag = targetEnc.shortBadge,
+                            hasLegacyKannada = targetEnc != KannadaEncodingChoice.UNICODE,
+                            hasUnicodeKannada = targetEnc == KannadaEncodingChoice.UNICODE
+                        )
+                        _uiState.value = _uiState.value.copy(
+                            uriString = registered.uriString,
+                            documentTitle = outFile.name,
+                            documentInfo = updatedInfo,
+                            isSaving = false,
+                            isDirty = false,
+                            showSavedTick = true,
+                            lastSavedLabel = "Converted (${targetEnc.shortBadge})",
+                            statusMessage = "Document converted to ${targetEnc.labelEn} (${outFile.name})"
+                        )
+                    }
+
+                    // 3. Two-step Share Different Format: persist in documents/ + register in Recent Files + Share
                     exportMode.startsWith("share_") -> {
                         val (encoding, fileType) = parseTwoStepMode(exportMode.removePrefix("share_"))
-                        val outFile = exportToCacheFile(parsedDoc, base, encoding, fileType)
+                        val outFile = exportToPersistentFile(parsedDoc, base, encoding, fileType)
+                        val registered = storageManager.registerExportedFile(
+                            file = outFile,
+                            displayName = outFile.name,
+                            format = fileType.docFormat,
+                            mimeType = fileType.mimeType
+                        )
+                        preferences.setDocumentFormatTag(
+                            registered.uriString,
+                            if (fileType == TargetFileType.PDF) "Modern" else encoding.shortBadge
+                        )
                         _uiState.value = _uiState.value.copy(isSaving = false)
                         ShareHelper.shareFile(
                             context = appContext,
@@ -376,14 +428,15 @@ class EditorViewModel(
                         )
                     }
 
-                    // 3. Two-step Save a Copy: savecopy_<encoding>_<ext>
+                    // 4. Two-step Save a Copy / Save As: SAF CreateDocument + auto-register in Recent Files
                     exportMode.startsWith("savecopy_") -> {
                         val (encoding, fileType) = parseTwoStepMode(exportMode.removePrefix("savecopy_"))
+                        val suggested = "${base}_${encoding.suffix}.${fileType.extension}"
                         pendingSafSaveDoc = parsedDoc
                         pendingSafEncoding = encoding
                         pendingSafFileType = fileType
+                        pendingSafSuggestedName = suggested
                         _uiState.value = _uiState.value.copy(isSaving = false)
-                        val suggested = "${base}_${encoding.suffix}.${fileType.extension}"
                         onRequestSafCreateFile(suggested, fileType.mimeType)
                     }
 
@@ -421,23 +474,28 @@ class EditorViewModel(
         return encoding to fileType
     }
 
-    private suspend fun exportToCacheFile(
+    private suspend fun exportToPersistentFile(
         parsedDoc: ParsedDocument,
         baseName: String,
         encoding: KannadaEncodingChoice,
         fileType: TargetFileType
     ): File = withContext(Dispatchers.IO) {
         when (fileType) {
-            TargetFileType.PDF -> pdfExporter.exportToPdf(parsedDoc, "${baseName}_${encoding.suffix}")
+            TargetFileType.PDF -> {
+                val cachedPdf = pdfExporter.exportToPdf(parsedDoc, "${baseName}_${encoding.suffix}")
+                val persistentPdf = storageManager.resolvePersistentExportFile(baseName, encoding.suffix, "pdf")
+                cachedPdf.copyTo(persistentPdf, overwrite = true)
+                persistentPdf
+            }
             TargetFileType.DOCX -> {
-                val out = storageManager.resolveExportCacheFile(baseName, encoding.suffix, "docx")
+                val out = storageManager.resolvePersistentExportFile(baseName, encoding.suffix, "docx")
                 FileOutputStream(out).use { fos ->
                     docxWriter.write(parsedDoc, fos, defaultFont = encoding.defaultFontForWord)
                 }
                 out
             }
             TargetFileType.DOC -> {
-                val out = storageManager.resolveExportCacheFile(baseName, encoding.suffix, "doc")
+                val out = storageManager.resolvePersistentExportFile(baseName, encoding.suffix, "doc")
                 FileOutputStream(out).use { fos ->
                     rtfDocWriter.write(parsedDoc, fos, defaultFont = encoding.defaultFontForWord)
                 }
@@ -450,6 +508,7 @@ class EditorViewModel(
         val doc = pendingSafSaveDoc ?: return
         val encoding = pendingSafEncoding
         val fileType = pendingSafFileType
+        val suggestedName = pendingSafSuggestedName
         pendingSafSaveDoc = null
 
         viewModelScope.launch {
@@ -475,10 +534,21 @@ class EditorViewModel(
                         }
                     }
                 }
+                // Register newly saved SAF copy immediately in Recent Files!
+                val registered = storageManager.registerSafSavedUri(
+                    targetUri = targetUri,
+                    fallbackDisplayName = suggestedName,
+                    format = fileType.docFormat,
+                    mimeType = fileType.mimeType
+                )
+                preferences.setDocumentFormatTag(
+                    registered.uriString,
+                    if (fileType == TargetFileType.PDF) "Modern" else encoding.shortBadge
+                )
             }.onSuccess {
                 _uiState.value = _uiState.value.copy(
                     isSaving = false,
-                    statusMessage = "Saved ${encoding.labelEn} (.${fileType.extension}) copy successfully"
+                    statusMessage = "Saved ${encoding.labelEn} (.${fileType.extension}) & added to Recent Files"
                 )
             }.onFailure { err ->
                 _uiState.value = _uiState.value.copy(
@@ -492,19 +562,34 @@ class EditorViewModel(
     private suspend fun writeInternalDocx(
         parsedDoc: ParsedDocument,
         targetFile: File,
-        defaultFont: String
+        defaultFont: String,
+        formatTag: String
     ) = withContext(Dispatchers.IO) {
         FileOutputStream(targetFile).use { fos ->
             docxWriter.write(parsedDoc, fos, defaultFont = defaultFont)
         }
         val savedUri = storageManager.uriForFile(targetFile).toString()
-        if (_uiState.value.uriString.isNotBlank()) {
-            recentFileDao.updateSavedUnicodeUri(
-                uriString = _uiState.value.uriString,
-                savedUri = savedUri,
-                timestamp = System.currentTimeMillis()
-            )
+        val currentUri = _uiState.value.uriString
+        if (currentUri.isNotBlank()) {
+            val existing = recentFileDao.getByUri(currentUri)
+            if (existing != null) {
+                recentFileDao.upsert(
+                    existing.copy(
+                        savedUnicodeUri = savedUri,
+                        fileSizeBytes = targetFile.length(),
+                        lastOpenedAt = System.currentTimeMillis()
+                    )
+                )
+            } else {
+                recentFileDao.updateSavedUnicodeUri(
+                    uriString = currentUri,
+                    savedUri = savedUri,
+                    timestamp = System.currentTimeMillis()
+                )
+            }
+            preferences.setDocumentFormatTag(currentUri, formatTag)
         }
+        preferences.setDocumentFormatTag(savedUri, formatTag)
     }
 
     private fun mimeForFileName(fileName: String, format: DocFormat): String {
@@ -535,6 +620,8 @@ class EditorViewModel(
 
         val fontFamilies = linkedSetOf<String>()
         val detectedCategories = linkedSetOf<String>()
+        var hasNudi = false
+        var hasBaraha = false
         var hasLegacy = false
         var hasUnicode = false
         var hasEnglish = false
@@ -548,14 +635,16 @@ class EditorViewModel(
             when {
                 KANNADA_UNICODE_REGEX.containsMatchIn(text) -> {
                     hasUnicode = true
-                    detectedCategories.add("Unicode Kannada")
+                    detectedCategories.add("Modern Unicode")
                 }
                 font != null && NUDI_FONT_REGEX.containsMatchIn(font) -> {
                     hasLegacy = true
+                    hasNudi = true
                     detectedCategories.add("Nudi (Legacy ASCII)")
                 }
                 font != null && BARAHA_FONT_REGEX.containsMatchIn(font) -> {
                     hasLegacy = true
+                    hasBaraha = true
                     detectedCategories.add("Baraha (BRH Kannada)")
                 }
                 font != null && SHREELIPI_FONT_REGEX.containsMatchIn(font) -> {
@@ -568,6 +657,7 @@ class EditorViewModel(
                 }
                 HIGH_ASCII_NUDI_REGEX.containsMatchIn(text) -> {
                     hasLegacy = true
+                    hasNudi = true
                     detectedCategories.add("Nudi / ASCII (Detected)")
                 }
                 LATIN_WORD_REGEX.containsMatchIn(text) -> {
@@ -578,15 +668,33 @@ class EditorViewModel(
 
         val summary = when {
             detectedCategories.isEmpty() && hasEnglish -> "English / Plain Text"
-            detectedCategories.isEmpty() -> "Blank / Unicode Kannada"
+            detectedCategories.isEmpty() -> "Blank / Modern Unicode"
             detectedCategories.size == 1 && hasEnglish -> "${detectedCategories.first()} + English"
             else -> detectedCategories.joinToString(" + ")
+        }
+
+        val currentEnc = when {
+            hasBaraha && !hasNudi && !hasUnicode -> KannadaEncodingChoice.BARAHA
+            hasNudi && !hasBaraha && !hasUnicode -> KannadaEncodingChoice.NUDI
+            hasUnicode && !hasLegacy -> KannadaEncodingChoice.UNICODE
+            hasBaraha -> KannadaEncodingChoice.BARAHA
+            hasNudi -> KannadaEncodingChoice.NUDI
+            else -> KannadaEncodingChoice.UNICODE
+        }
+
+        val shortTag = when {
+            detectedCategories.isEmpty() && hasEnglish -> "English"
+            hasBaraha -> "Baraha"
+            hasNudi -> "Nudi"
+            else -> "Modern"
         }
 
         return DocumentInfo(
             fileName = doc.fileName,
             fileFormat = doc.sourceFormat,
             detectedEncodingLabel = summary,
+            currentEncoding = currentEnc,
+            shortFormatTag = shortTag,
             fontFamiliesFound = fontFamilies.toList(),
             hasLegacyKannada = hasLegacy,
             hasUnicodeKannada = hasUnicode,
@@ -600,6 +708,7 @@ class EditorViewModel(
         private val storageManager: SafStorageManager,
         private val recentFileDao: RecentFileDao,
         private val draftDao: DraftDao,
+        private val preferences: AppPreferences,
         private val docxWriter: DocxWriter,
         private val rtfDocWriter: RtfDocWriter,
         private val pdfExporter: PdfExporter
@@ -612,6 +721,7 @@ class EditorViewModel(
                 storageManager,
                 recentFileDao,
                 draftDao,
+                preferences,
                 docxWriter,
                 rtfDocWriter,
                 pdfExporter

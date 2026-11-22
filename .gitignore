@@ -58,4 +58,6 @@ Thumbs.db
 
 # Local scripts / temporary test files
 *.log
+publish-pre-steps.md
+publish*steps*.md
 android/app/src/main/assets/fonts/legacy/

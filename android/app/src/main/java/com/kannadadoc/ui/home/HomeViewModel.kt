@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.kannadadoc.converter.KannadaTextConverter
+import com.kannadadoc.data.local.AppPreferences
 import com.kannadadoc.data.local.DraftDao
 import com.kannadadoc.data.local.RecentFileDao
 import com.kannadadoc.data.local.RecentFileEntity
@@ -17,7 +18,9 @@ import com.kannadadoc.export.DocxWriter
 import com.kannadadoc.export.PdfExporter
 import com.kannadadoc.export.RtfDocWriter
 import com.kannadadoc.export.ShareHelper
+import com.kannadadoc.parser.DocBlock
 import com.kannadadoc.parser.DocFormat
+import com.kannadadoc.parser.TextRun
 import com.kannadadoc.parser.DocumentJson
 import com.kannadadoc.parser.DocumentParserFacade
 import com.kannadadoc.parser.ParsedDocument
@@ -30,7 +33,6 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -56,6 +58,7 @@ class HomeViewModel(
     private val storageManager: SafStorageManager,
     private val recentFileDao: RecentFileDao,
     private val draftDao: DraftDao,
+    private val preferences: AppPreferences,
     private val parserFacade: DocumentParserFacade,
     private val docxWriter: DocxWriter,
     private val rtfDocWriter: RtfDocWriter,
@@ -64,6 +67,11 @@ class HomeViewModel(
 
     companion object {
         private val INTERNAL_HEX_PREFIX = Regex("^[0-9a-f]{12}_", RegexOption.IGNORE_CASE)
+        private val KANNADA_UNICODE_REGEX = Regex("[\u0C80-\u0CFF]")
+        private val HIGH_ASCII_NUDI_REGEX = Regex("[\u00A2-\u00FF]")
+        private val LATIN_WORD_REGEX = Regex("[A-Za-z]{2,}")
+        private val NUDI_FONT_REGEX = Regex("(^nudi|nudi[\\s\\-_]*\\d|kgp|kan[\\-_]?nudi)", RegexOption.IGNORE_CASE)
+        private val BARAHA_FONT_REGEX = Regex("(^brh|baraha|tunga[\\s\\-_]*brh)", RegexOption.IGNORE_CASE)
     }
 
     private val _selectedFilter = MutableStateFlow(LibraryFilter.ALL)
@@ -92,13 +100,18 @@ class HomeViewModel(
     private var pendingSafDoc: ParsedDocument? = null
     private var pendingSafEncoding: KannadaEncodingChoice = KannadaEncodingChoice.NUDI
     private var pendingSafFileType: TargetFileType = TargetFileType.DOCX
+    private var pendingSafSuggestedName: String = "Document.docx"
+
+    private val backfilledUris = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
     init {
-        // Silently clean any old 12-hex-char internal prefixes stored in earlier builds
+        // Continuously backfill missing file sizes and Kannada format tags (Nudi/Baraha/Modern/English/Scanned)
+        // for all Recent Files so every single card/row displays consistent metadata.
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching {
-                val existing = recentFileDao.observeRecentFiles(100).first()
-                for (item in existing) {
+            recentFileDao.observeRecentFiles(100).collect { files ->
+                val knownFormats = preferences.documentFormatMap.value
+                for (item in files) {
+                    // 1. Clean legacy internal hex prefix if present
                     if (INTERNAL_HEX_PREFIX.containsMatchIn(item.displayName)) {
                         val cleaned = item.displayName.replace(INTERNAL_HEX_PREFIX, "")
                         if (cleaned.isNotBlank()) {
@@ -106,8 +119,94 @@ class HomeViewModel(
                             draftDao.updateTitle(item.uriString, cleaned)
                         }
                     }
+
+                    val existingTag = knownFormats[item.uriString]
+                        ?: item.savedUnicodeUri?.let { knownFormats[it] }
+                    val needsSize = item.fileSizeBytes <= 0L
+                    val needsFormat = existingTag.isNullOrBlank() || existingTag == "PDF"
+
+                    if (!needsSize && !needsFormat) continue
+                    val key = "${item.uriString}:${item.fileSizeBytes}:${existingTag.orEmpty()}"
+                    if (!backfilledUris.add(key)) continue
+
+                    runCatching {
+                        if (needsSize) {
+                            val primaryUri = Uri.parse(item.savedUnicodeUri ?: item.uriString)
+                            var actualSize = storageManager.queryActualFileSize(primaryUri)
+                            if (actualSize <= 0L && item.savedUnicodeUri != null) {
+                                actualSize = storageManager.queryActualFileSize(Uri.parse(item.uriString))
+                            }
+                            if (actualSize > 0L) {
+                                recentFileDao.updateFileSize(item.uriString, actualSize)
+                            }
+                        }
+
+                        if (needsFormat) {
+                            val detectedTag = detectFormatTagForRecent(item)
+                            if (detectedTag.isNotBlank()) {
+                                preferences.setDocumentFormatTag(item.uriString, detectedTag)
+                            }
+                        }
+                    }
                 }
             }
+        }
+    }
+
+    private suspend fun detectFormatTagForRecent(item: RecentFileEntity): String {
+        val name = item.displayName
+        when {
+            name.contains("_Nudi", ignoreCase = true) -> return "Nudi"
+            name.contains("_Baraha", ignoreCase = true) -> return "Baraha"
+            name.contains("_Unicode", ignoreCase = true) -> return "Modern"
+        }
+
+        val inspectUri = Uri.parse(item.savedUnicodeUri ?: item.uriString)
+        val parsed = parserFacade.parseDocument(appContext, inspectUri, item.displayName, item.detectedFormat)
+            .getOrNull()
+
+        if (parsed == null) {
+            return if (item.detectedFormat == DocFormat.PDF) "Scanned" else "Modern"
+        }
+
+        val allRuns = mutableListOf<TextRun>()
+        for (block in parsed.blocks) {
+            when (block) {
+                is DocBlock.Paragraph -> allRuns.addAll(block.runs)
+                is DocBlock.Table -> block.rows.forEach { row ->
+                    row.forEach { cell -> cell.forEach { p -> allRuns.addAll(p.runs) } }
+                }
+            }
+        }
+
+        var hasNudi = false
+        var hasBaraha = false
+        var hasUnicode = false
+        var hasEnglish = false
+        var nonBlankRuns = 0
+
+        for (run in allRuns) {
+            val text = run.text
+            if (text.isBlank()) continue
+            nonBlankRuns++
+            val font = run.fontFamily?.trim()
+            when {
+                KANNADA_UNICODE_REGEX.containsMatchIn(text) -> hasUnicode = true
+                font != null && BARAHA_FONT_REGEX.containsMatchIn(font) -> hasBaraha = true
+                font != null && NUDI_FONT_REGEX.containsMatchIn(font) -> hasNudi = true
+                HIGH_ASCII_NUDI_REGEX.containsMatchIn(text) -> hasNudi = true
+                LATIN_WORD_REGEX.containsMatchIn(text) -> hasEnglish = true
+            }
+        }
+
+        return when {
+            nonBlankRuns == 0 && item.detectedFormat == DocFormat.PDF -> "Scanned"
+            hasBaraha -> "Baraha"
+            hasNudi -> "Nudi"
+            hasUnicode -> "Modern"
+            hasEnglish -> "English"
+            item.detectedFormat == DocFormat.PDF -> "Scanned"
+            else -> preferences.settings.value.defaultSaveFormat.shortLabel
         }
     }
 
@@ -130,6 +229,7 @@ class HomeViewModel(
             storageManager.ingestDocument(uri, intentFlags, titleHint)
                 .onSuccess { ingested ->
                     _uiState.value = _uiState.value.copy(isLoading = false)
+
                     onDocumentReady(ingested)
                 }
                 .onFailure { error ->
@@ -154,6 +254,10 @@ class HomeViewModel(
     ) {
         viewModelScope.launch {
             val doc = storageManager.registerNewBlankDocument(title)
+            preferences.setDocumentFormatTag(
+                doc.entity.uriString,
+                preferences.settings.value.defaultSaveFormat.shortLabel
+            )
             onCreated(doc)
         }
     }
@@ -177,6 +281,7 @@ class HomeViewModel(
         viewModelScope.launch {
             recentFileDao.deleteByUri(uriString)
             draftDao.deleteDraft(uriString)
+            preferences.removeDocumentFormatTag(uriString)
         }
     }
 
@@ -204,7 +309,8 @@ class HomeViewModel(
     }
 
     /**
-     * Performs 2-step Share Different Format or Save As directly from the Home card 3-dot menu.
+     * Performs 2-step Share Different Format or Save As directly from the Home card 3-dot menu,
+     * and registers the newly created file in Recent Files automatically!
      */
     fun exportRecentFile(
         entity: RecentFileEntity,
@@ -229,16 +335,21 @@ class HomeViewModel(
                 if (action == ExportAction.SHARE_DIFFERENT) {
                     val outFile = withContext(Dispatchers.IO) {
                         when (fileType) {
-                            TargetFileType.PDF -> pdfExporter.exportToPdf(preparedDoc, "${base}_${encoding.suffix}")
+                            TargetFileType.PDF -> {
+                                val cachedPdf = pdfExporter.exportToPdf(preparedDoc, "${base}_${encoding.suffix}")
+                                val persistentPdf = storageManager.resolvePersistentExportFile(base, encoding.suffix, "pdf")
+                                cachedPdf.copyTo(persistentPdf, overwrite = true)
+                                persistentPdf
+                            }
                             TargetFileType.DOCX -> {
-                                val f = storageManager.resolveExportCacheFile(base, encoding.suffix, "docx")
+                                val f = storageManager.resolvePersistentExportFile(base, encoding.suffix, "docx")
                                 FileOutputStream(f).use { fos ->
                                     docxWriter.write(preparedDoc, fos, defaultFont = encoding.defaultFontForWord)
                                 }
                                 f
                             }
                             TargetFileType.DOC -> {
-                                val f = storageManager.resolveExportCacheFile(base, encoding.suffix, "doc")
+                                val f = storageManager.resolvePersistentExportFile(base, encoding.suffix, "doc")
                                 FileOutputStream(f).use { fos ->
                                     rtfDocWriter.write(preparedDoc, fos, defaultFont = encoding.defaultFontForWord)
                                 }
@@ -246,6 +357,16 @@ class HomeViewModel(
                             }
                         }
                     }
+                    val registered = storageManager.registerExportedFile(
+                        file = outFile,
+                        displayName = outFile.name,
+                        format = fileType.docFormat,
+                        mimeType = fileType.mimeType
+                    )
+                    preferences.setDocumentFormatTag(
+                        registered.uriString,
+                        if (fileType == TargetFileType.PDF) "Modern" else encoding.shortBadge
+                    )
                     _uiState.value = _uiState.value.copy(isLoading = false)
                     ShareHelper.shareFile(
                         context = appContext,
@@ -254,11 +375,13 @@ class HomeViewModel(
                         chooserTitle = "Share ${encoding.labelEn} (${fileType.extension.uppercase()})"
                     )
                 } else {
+                    val suggested = "${base}_${encoding.suffix}.${fileType.extension}"
                     pendingSafDoc = preparedDoc
                     pendingSafEncoding = encoding
                     pendingSafFileType = fileType
+                    pendingSafSuggestedName = suggested
                     _uiState.value = _uiState.value.copy(isLoading = false)
-                    onRequestSafCreateFile("${base}_${encoding.suffix}.${fileType.extension}", fileType.mimeType)
+                    onRequestSafCreateFile(suggested, fileType.mimeType)
                 }
             }.onFailure { err ->
                 _uiState.value = _uiState.value.copy(
@@ -273,6 +396,7 @@ class HomeViewModel(
         val doc = pendingSafDoc ?: return
         val encoding = pendingSafEncoding
         val fileType = pendingSafFileType
+        val suggestedName = pendingSafSuggestedName
         pendingSafDoc = null
 
         viewModelScope.launch {
@@ -298,10 +422,20 @@ class HomeViewModel(
                         }
                     }
                 }
+                val registered = storageManager.registerSafSavedUri(
+                    targetUri = targetUri,
+                    fallbackDisplayName = suggestedName,
+                    format = fileType.docFormat,
+                    mimeType = fileType.mimeType
+                )
+                preferences.setDocumentFormatTag(
+                    registered.uriString,
+                    if (fileType == TargetFileType.PDF) "Modern" else encoding.shortBadge
+                )
             }.onSuccess {
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,
-                    statusMessage = "Saved ${encoding.labelEn} (.${fileType.extension}) copy successfully"
+                    statusMessage = "Saved ${encoding.labelEn} (.${fileType.extension}) & added to Recent Files"
                 )
             }.onFailure { err ->
                 _uiState.value = _uiState.value.copy(
@@ -357,6 +491,7 @@ class HomeViewModel(
         private val storageManager: SafStorageManager,
         private val recentFileDao: RecentFileDao,
         private val draftDao: DraftDao,
+        private val preferences: AppPreferences,
         private val parserFacade: DocumentParserFacade,
         private val docxWriter: DocxWriter,
         private val rtfDocWriter: RtfDocWriter,
@@ -369,6 +504,7 @@ class HomeViewModel(
                 storageManager,
                 recentFileDao,
                 draftDao,
+                preferences,
                 parserFacade,
                 docxWriter,
                 rtfDocWriter,

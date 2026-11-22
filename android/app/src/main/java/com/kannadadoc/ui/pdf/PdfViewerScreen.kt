@@ -1,16 +1,22 @@
 package com.kannadadoc.ui.pdf
 
 import android.graphics.Bitmap
-import android.graphics.Color
+import android.graphics.Color as AndroidColor
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.ParcelFileDescriptor
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -19,62 +25,66 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.MenuBook
-import androidx.compose.material.icons.filled.ZoomIn
-import androidx.compose.material.icons.filled.ZoomOut
+import androidx.compose.material.icons.filled.FitScreen
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.kannadadoc.parser.DocFormat
 import com.kannadadoc.parser.DocumentParserFacade
 import com.kannadadoc.parser.ParsedDocument
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 
-/**
- * Tablet-first native PDF viewer using Android's PdfRenderer.
- * - Supports 1-page & 2-page landscape spread mode (ideal for Lenovo Idea Tab Pro 12.7").
- * - Pinch-to-zoom and button zoom.
- * - One-tap "Edit Text" invokes PDFBox-Android to extract & convert legacy Kannada fonts.
- */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun PdfViewerScreen(
     uri: Uri,
@@ -86,242 +96,394 @@ fun PdfViewerScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
 
-    var pdfPfd by remember { mutableStateOf<ParcelFileDescriptor?>(null) }
-    var pdfRenderer by remember { mutableStateOf<PdfRenderer?>(null) }
+    var pfd by remember { mutableStateOf<ParcelFileDescriptor?>(null) }
+    var renderer by remember { mutableStateOf<PdfRenderer?>(null) }
     var pageCount by remember { mutableIntStateOf(0) }
-    var currentPage by remember { mutableIntStateOf(0) }
-    var twoPageMode by remember { mutableStateOf(false) }
+    var loadError by remember { mutableStateOf<String?>(null) }
+    var isExtracting by remember { mutableStateOf(false) }
+
+    val renderMutex = remember { Mutex() }
+    val bitmapCache = remember { mutableStateMapOf<Int, Bitmap>() }
+
+    // Zoom & pan state (reset automatically on page turn)
     var zoomScale by remember { mutableFloatStateOf(1f) }
-    var renderedBitmaps by remember { mutableStateOf<List<Bitmap>>(emptyList()) }
-    var isExtractingText by remember { mutableStateOf(false) }
-    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var panOffset by remember { mutableStateOf(Offset.Zero) }
 
-    // Open PdfRenderer
-    DisposableEffect(uri) {
-        try {
-            val pfd = context.contentResolver.openFileDescriptor(uri, "r")
-            if (pfd != null) {
-                val renderer = PdfRenderer(pfd)
-                pdfPfd = pfd
-                pdfRenderer = renderer
-                pageCount = renderer.pageCount
-            } else {
-                errorMessage = "Could not open PDF file descriptor."
+    // Open ParcelFileDescriptor & PdfRenderer safely on IO dispatcher
+    LaunchedEffect(uri) {
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val descriptor = context.contentResolver.openFileDescriptor(uri, "r")
+                    ?: error("Unable to open PDF file")
+                val pdfRenderer = PdfRenderer(descriptor)
+                pfd = descriptor
+                renderer = pdfRenderer
+                pageCount = pdfRenderer.pageCount
+            }.onFailure { err ->
+                loadError = err.localizedMessage ?: "Failed to render PDF"
             }
-        } catch (e: Exception) {
-            errorMessage = e.localizedMessage ?: "Failed to render PDF"
-        }
-
-        onDispose {
-            renderedBitmaps.forEach { it.recycle() }
-            renderedBitmaps = emptyList()
-            runCatching { pdfRenderer?.close() }
-            runCatching { pdfPfd?.close() }
-            pdfRenderer = null
-            pdfPfd = null
         }
     }
 
-    // Render active page(s) on IO thread
-    LaunchedEffect(pdfRenderer, currentPage, twoPageMode) {
-        val renderer = pdfRenderer ?: return@LaunchedEffect
-        if (pageCount == 0) return@LaunchedEffect
-
-        val indices = if (twoPageMode && currentPage + 1 < pageCount) {
-            listOf(currentPage, currentPage + 1)
-        } else {
-            listOf(currentPage)
+    DisposableEffect(uri) {
+        onDispose {
+            runCatching { renderer?.close() }
+            runCatching { pfd?.close() }
+            bitmapCache.clear()
         }
+    }
 
-        val bitmaps = withContext(Dispatchers.IO) {
-            indices.map { idx ->
-                renderer.openPage(idx).use { page ->
-                    // Render at 2x DPI for sharp text on 12.7" 3K tablet display
-                    val width = (page.width * 2).coerceAtMost(2400)
-                    val height = (page.height * 2).coerceAtMost(3200)
-                    val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-                    bmp.eraseColor(Color.WHITE)
-                    page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                    bmp
-                }
-            }
-        }
+    val safePageCount = pageCount.coerceAtLeast(1)
+    val pagerState = rememberPagerState(initialPage = 0, pageCount = { safePageCount })
 
-        renderedBitmaps.forEach { it.recycle() }
-        renderedBitmaps = bitmaps
+    // Reset zoom when navigating to another page
+    LaunchedEffect(pagerState.currentPage) {
+        zoomScale = 1f
+        panOffset = Offset.Zero
     }
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                navigationIcon = {
-                    IconButton(onClick = onBack, modifier = Modifier.size(52.dp)) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                    }
-                },
-                title = {
-                    Column {
-                        Text(
-                            text = fileName,
-                            style = MaterialTheme.typography.titleMedium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+            // Sleek, non-colliding 48dp header (MainActivity handles top status bar strip)
+            Surface(
+                color = MaterialTheme.colorScheme.surface,
+                contentColor = MaterialTheme.colorScheme.onSurface,
+                tonalElevation = 1.dp,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .padding(horizontal = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(
+                        onClick = onBack,
+                        modifier = Modifier.size(40.dp)
+                    ) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Back",
+                            modifier = Modifier.size(22.dp)
                         )
-                        if (pageCount > 0) {
-                            Text(
-                                text = "Page ${currentPage + 1} of $pageCount",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+
+                    Text(
+                        text = fileName,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(horizontal = 6.dp)
+                    )
+
+                    if (zoomScale > 1.05f) {
+                        IconButton(
+                            onClick = {
+                                zoomScale = 1f
+                                panOffset = Offset.Zero
+                            },
+                            modifier = Modifier.size(38.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.FitScreen,
+                                contentDescription = "Reset zoom",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
                             )
                         }
                     }
-                },
-                actions = {
-                    IconButton(onClick = { zoomScale = (zoomScale - 0.25f).coerceAtLeast(1f) }) {
-                        Icon(Icons.Default.ZoomOut, contentDescription = "Zoom out")
-                    }
-                    IconButton(onClick = { zoomScale = (zoomScale + 0.25f).coerceAtMost(3f) }) {
-                        Icon(Icons.Default.ZoomIn, contentDescription = "Zoom in")
-                    }
-                    IconButton(onClick = { twoPageMode = !twoPageMode }) {
-                        Icon(
-                            Icons.Default.MenuBook,
-                            contentDescription = "Toggle 2-page spread",
-                            tint = if (twoPageMode) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Spacer(Modifier.width(8.dp))
+
                     Button(
                         onClick = {
-                            isExtractingText = true
+                            if (isExtracting) return@Button
                             scope.launch {
-                                parserFacade.parseDocument(context, uri, fileName, DocFormat.PDF)
+                                isExtracting = true
+                                val result = parserFacade.parseDocument(context, uri, fileName, DocFormat.PDF)
+                                isExtracting = false
+                                result
                                     .onSuccess { extracted ->
-                                        isExtractingText = false
                                         onOpenExtractedDocument(extracted)
                                     }
                                     .onFailure { err ->
-                                        isExtractingText = false
-                                        errorMessage = err.localizedMessage ?: "PDF text extraction failed"
+                                        snackbarHostState.showSnackbar(
+                                            err.localizedMessage ?: "Could not extract text from this PDF"
+                                        )
                                     }
                             }
                         },
-                        enabled = !isExtractingText
+                        enabled = !isExtracting && loadError == null,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                        modifier = Modifier.height(34.dp)
                     ) {
-                        Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(20.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text(if (bilingualLabels) "Edit Text • ತಿದ್ದುಪಡಿ" else "Edit Text")
-                    }
-                    Spacer(Modifier.width(8.dp))
-                }
-            )
-        },
-        bottomBar = {
-            if (pageCount > 1) {
-                Surface(tonalElevation = 3.dp, modifier = Modifier.fillMaxWidth()) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 24.dp, vertical = 10.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        val step = if (twoPageMode) 2 else 1
-                        FilledTonalIconButton(
-                            onClick = { currentPage = (currentPage - step).coerceAtLeast(0) },
-                            enabled = currentPage > 0,
-                            modifier = Modifier.size(52.dp)
-                        ) {
-                            Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = "Previous page")
+                        if (isExtracting) {
+                            CircularProgressIndicator(
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        } else {
+                            Icon(
+                                Icons.Default.Edit,
+                                contentDescription = null,
+                                modifier = Modifier.size(15.dp)
+                            )
                         }
-
+                        Spacer(Modifier.width(5.dp))
                         Text(
-                            text = if (twoPageMode && currentPage + 1 < pageCount) {
-                                "Pages ${currentPage + 1}–${currentPage + 2} / $pageCount"
-                            } else {
-                                "Page ${currentPage + 1} / $pageCount"
-                            },
-                            style = MaterialTheme.typography.titleMedium
+                            text = if (bilingualLabels) "Edit" else "ತಿದ್ದುಪಡಿ",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false
                         )
-
-                        FilledTonalIconButton(
-                            onClick = {
-                                val next = currentPage + step
-                                if (next < pageCount) currentPage = next
-                            },
-                            enabled = currentPage + step < pageCount,
-                            modifier = Modifier.size(52.dp)
-                        ) {
-                            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "Next page")
-                        }
                     }
                 }
             }
-        }
-    ) { padding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .background(MaterialTheme.colorScheme.surfaceVariant)
-                .pointerInput(Unit) {
-                    detectTransformGestures { _, _, zoom, _ ->
-                        zoomScale = (zoomScale * zoom).coerceIn(1f, 3f)
-                    }
-                },
-            contentAlignment = Alignment.Center
-        ) {
-            when {
-                errorMessage != null -> {
-                    Text(
-                        text = errorMessage ?: "",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.padding(24.dp)
-                    )
-                }
-
-                isExtractingText -> {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        CircularProgressIndicator()
-                        Spacer(Modifier.height(12.dp))
-                        Text("Extracting Kannada text from PDF...", style = MaterialTheme.typography.titleMedium)
-                    }
-                }
-
-                renderedBitmaps.isEmpty() -> {
-                    CircularProgressIndicator()
-                }
-
-                else -> {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .verticalScroll(rememberScrollState())
-                            .padding(16.dp)
-                            .graphicsLayer(scaleX = zoomScale, scaleY = zoomScale),
-                        horizontalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterHorizontally),
-                        verticalAlignment = Alignment.Top
-                    ) {
-                        renderedBitmaps.forEach { bmp ->
-                            Card(
-                                elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
-                                colors = CardDefaults.cardColors(containerColor = androidx.compose.ui.graphics.Color.White),
-                                modifier = Modifier.weight(1f, fill = false)
+        },
+        bottomBar = {
+            if (pageCount > 0) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surface,
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                    tonalElevation = 3.dp,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column {
+                        HorizontalDivider(
+                            thickness = 0.5.dp,
+                            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(54.dp)
+                                .padding(horizontal = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            FilledTonalIconButton(
+                                onClick = {
+                                    val prev = (pagerState.currentPage - 1).coerceAtLeast(0)
+                                    scope.launch { pagerState.animateScrollToPage(prev) }
+                                },
+                                enabled = pagerState.currentPage > 0,
+                                modifier = Modifier.size(40.dp)
                             ) {
-                                Image(
-                                    bitmap = bmp.asImageBitmap(),
-                                    contentDescription = "PDF page",
-                                    contentScale = ContentScale.FillWidth,
-                                    modifier = Modifier.fillMaxWidth()
+                                Icon(
+                                    Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                                    contentDescription = "Previous page"
+                                )
+                            }
+
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    text = if (bilingualLabels) {
+                                        "Page ${pagerState.currentPage + 1} / $pageCount"
+                                    } else {
+                                        "ಪುಟ ${pagerState.currentPage + 1} / $pageCount"
+                                    },
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                if (zoomScale > 1.05f) {
+                                    Text(
+                                        text = "${(zoomScale * 100).roundToInt()}%",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
+
+                            FilledTonalIconButton(
+                                onClick = {
+                                    val next = (pagerState.currentPage + 1).coerceAtMost(pageCount - 1)
+                                    scope.launch { pagerState.animateScrollToPage(next) }
+                                },
+                                enabled = pagerState.currentPage < pageCount - 1,
+                                modifier = Modifier.size(40.dp)
+                            ) {
+                                Icon(
+                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                    contentDescription = "Next page"
                                 )
                             }
                         }
                     }
                 }
             }
+        },
+        snackbarHost = { SnackbarHost(snackbarHostState) }
+    ) { padding ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f)),
+            contentAlignment = Alignment.Center
+        ) {
+            when {
+                loadError != null -> {
+                    Text(
+                        text = loadError ?: "Unable to open PDF",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(24.dp)
+                    )
+                }
+
+                pageCount == 0 -> {
+                    CircularProgressIndicator()
+                }
+
+                else -> {
+                    // Natural horizontal swipe/slide between pages when at 1x zoom;
+                    // smooth pinch-to-zoom (1x..4x), pan when zoomed, and double-tap zoom.
+                    HorizontalPager(
+                        state = pagerState,
+                        userScrollEnabled = zoomScale <= 1.05f,
+                        modifier = Modifier.fillMaxSize()
+                    ) { pageIndex ->
+                        PdfZoomablePage(
+                            pageIndex = pageIndex,
+                            renderer = renderer,
+                            renderMutex = renderMutex,
+                            bitmapCache = bitmapCache,
+                            zoomScale = if (pagerState.currentPage == pageIndex) zoomScale else 1f,
+                            panOffset = if (pagerState.currentPage == pageIndex) panOffset else Offset.Zero,
+                            onTransformChange = { newScale, newOffset ->
+                                zoomScale = newScale
+                                panOffset = newOffset
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PdfZoomablePage(
+    pageIndex: Int,
+    renderer: PdfRenderer?,
+    renderMutex: Mutex,
+    bitmapCache: MutableMap<Int, Bitmap>,
+    zoomScale: Float,
+    panOffset: Offset,
+    onTransformChange: (Float, Offset) -> Unit
+) {
+    var containerSize by remember { mutableStateOf(IntSize.Zero) }
+    val cachedBitmap = bitmapCache[pageIndex]
+
+    LaunchedEffect(pageIndex, renderer) {
+        if (renderer != null && bitmapCache[pageIndex] == null) {
+            val bmp = withContext(Dispatchers.IO) {
+                renderMutex.withLock {
+                    runCatching {
+                        renderer.openPage(pageIndex).use { page ->
+                            // Render crisp high-resolution bitmap (~2.2x PDF points, capped safely at 2200px)
+                            val targetScale = minOf(2.2f, 2200f / maxOf(page.width, page.height).coerceAtLeast(1))
+                            val w = (page.width * targetScale).roundToInt().coerceAtLeast(1)
+                            val h = (page.height * targetScale).roundToInt().coerceAtLeast(1)
+                            val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                            bitmap.eraseColor(AndroidColor.WHITE)
+                            page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                            bitmap
+                        }
+                    }.getOrNull()
+                }
+            }
+            if (bmp != null) {
+                // Keep memory bounded: keep only current +/- 3 pages cached
+                val keysToDrop = bitmapCache.keys.filter { kotlin.math.abs(it - pageIndex) > 3 }
+                keysToDrop.forEach { bitmapCache.remove(it) }
+                bitmapCache[pageIndex] = bmp
+            }
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .onSizeChanged { containerSize = it }
+            .pointerInput(zoomScale) {
+                detectTapGestures(
+                    onDoubleTap = {
+                        if (zoomScale > 1.2f) {
+                            onTransformChange(1f, Offset.Zero)
+                        } else {
+                            onTransformChange(2.2f, Offset.Zero)
+                        }
+                    }
+                )
+            }
+            .pointerInput(zoomScale, panOffset, containerSize) {
+                // Custom multi-touch handler:
+                // - 2+ fingers ALWAYS pinch-to-zoom & pan cleanly
+                // - 1 finger pans ONLY when zoomed in (zoomScale > 1.05f)
+                // - 1 finger at 1x zoom is NOT consumed so HorizontalPager swipes effortlessly!
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    var curScale = zoomScale
+                    var curOffset = panOffset
+                    do {
+                        val event = awaitPointerEvent()
+                        val pressedCount = event.changes.count { it.pressed }
+                        val zoomChange = event.calculateZoom()
+                        val panChange = event.calculatePan()
+
+                        if (pressedCount >= 2 || curScale > 1.05f) {
+                            val nextScale = (curScale * zoomChange).coerceIn(1f, 4f)
+                            val maxX = ((containerSize.width * (nextScale - 1f)) / 2f).coerceAtLeast(0f)
+                            val maxY = ((containerSize.height * (nextScale - 1f)) / 2f).coerceAtLeast(0f)
+                            val nextOffset = if (nextScale <= 1.02f) {
+                                Offset.Zero
+                            } else {
+                                Offset(
+                                    x = (curOffset.x + panChange.x).coerceIn(-maxX, maxX),
+                                    y = (curOffset.y + panChange.y).coerceIn(-maxY, maxY)
+                                )
+                            }
+                            if (nextScale != curScale || nextOffset != curOffset) {
+                                curScale = nextScale
+                                curOffset = nextOffset
+                                onTransformChange(curScale, curOffset)
+                            }
+                            if (pressedCount >= 2 || curScale > 1.05f) {
+                                event.changes.forEach { it.consume() }
+                            }
+                        }
+                    } while (event.changes.any { it.pressed })
+                }
+            }
+            .padding(10.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        if (cachedBitmap != null) {
+            Image(
+                bitmap = cachedBitmap.asImageBitmap(),
+                contentDescription = "PDF Page ${pageIndex + 1}",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer(
+                        scaleX = zoomScale,
+                        scaleY = zoomScale,
+                        translationX = panOffset.x,
+                        translationY = panOffset.y
+                    )
+                    .shadow(4.dp, RoundedCornerShape(6.dp))
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color.White)
+            )
+        } else {
+            CircularProgressIndicator()
         }
     }
 }

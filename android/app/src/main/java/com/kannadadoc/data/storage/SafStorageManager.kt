@@ -59,7 +59,15 @@ class SafStorageManager(
             val persisted = tryPersistPermission(sourceUri, intentFlags)
 
             val (finalUri, isLocallyImported, finalSize) = if (persisted) {
-                Triple(sourceUri, false, meta.sizeBytes)
+                Triple(
+                    sourceUri,
+                    false,
+                    if (meta.sizeBytes >= 0L) meta.sizeBytes else {
+                        runCatching {
+                            contentResolver.openAssetFileDescriptor(sourceUri, "r")?.use { it.length } ?: -1L
+                        }.getOrDefault(-1L)
+                    }
+                )
             } else {
                 val importedFile = copyToImportedStorage(sourceUri, meta.displayName)
                 val providerUri = FileProvider.getUriForFile(
@@ -166,6 +174,87 @@ class SafStorageManager(
     }
 
     /**
+     * Resolves a persistent file in Kadata's documents directory so exported/shared/converted files
+     * remain directly openable from Recent Files on the Home screen.
+     */
+    fun resolvePersistentExportFile(baseFileName: String, suffix: String, extension: String): File {
+        val docsDir = File(context.filesDir, "documents").apply { mkdirs() }
+        val base = baseFileName.substringBeforeLast('.').ifBlank { "Document" }
+        val cleanBase = sanitizeFileName(base)
+        val fullName = if (suffix.isBlank()) "$cleanBase.$extension" else "${cleanBase}_${suffix}.$extension"
+        return File(docsDir, fullName)
+    }
+
+    /**
+     * Registers an internally written exported/converted file in Recent Files immediately.
+     */
+    suspend fun registerExportedFile(
+        file: File,
+        displayName: String,
+        format: DocFormat,
+        mimeType: String
+    ): RecentFileEntity = withContext(Dispatchers.IO) {
+        val providerUri = uriForFile(file).toString()
+        val existing = recentFileDao.getByUri(providerUri)
+        val entity = RecentFileEntity(
+            id = existing?.id ?: 0,
+            uriString = providerUri,
+            displayName = displayName,
+            detectedFormat = format,
+            mimeType = mimeType,
+            fileSizeBytes = file.length(),
+            isLocallyImported = true,
+            converterOverride = null,
+            savedUnicodeUri = providerUri,
+            lastOpenedAt = System.currentTimeMillis()
+        )
+        recentFileDao.upsert(entity)
+        entity
+    }
+
+    /**
+     * Registers a file saved via Android SAF (Save As / Save a Copy) in Recent Files
+     * so it appears immediately on the Home page without requiring File Explorer.
+     */
+    suspend fun registerSafSavedUri(
+        targetUri: Uri,
+        fallbackDisplayName: String,
+        format: DocFormat,
+        mimeType: String
+    ): RecentFileEntity = withContext(Dispatchers.IO) {
+        tryPersistPermission(
+            targetUri,
+            Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        )
+        val meta = queryFileMetadata(targetUri, fallbackDisplayName)
+        val resolvedName = meta.displayName
+            .replace(INTERNAL_HASH_PREFIX_REGEX, "")
+            .takeIf { it.isNotBlank() && !it.equals("Untitled", ignoreCase = true) }
+            ?: fallbackDisplayName
+        val sizeBytes = if (meta.sizeBytes >= 0) meta.sizeBytes else {
+            runCatching {
+                context.contentResolver.openAssetFileDescriptor(targetUri, "r")?.use { it.length } ?: -1L
+            }.getOrDefault(-1L)
+        }
+        val uriStr = targetUri.toString()
+        val existing = recentFileDao.getByUri(uriStr)
+        val entity = RecentFileEntity(
+            id = existing?.id ?: 0,
+            uriString = uriStr,
+            displayName = resolvedName,
+            detectedFormat = format,
+            mimeType = mimeType,
+            fileSizeBytes = sizeBytes,
+            isLocallyImported = false,
+            converterOverride = null,
+            savedUnicodeUri = uriStr,
+            lastOpenedAt = System.currentTimeMillis()
+        )
+        recentFileDao.upsert(entity)
+        entity
+    }
+
+    /**
      * Copies any readable URI (SAF or internal FileProvider) to cacheDir/exports/<displayName>
      * so "Share" (as-is) works reliably across WhatsApp/Gmail/Bluetooth with the real filename.
      */
@@ -183,6 +272,27 @@ class SafStorageManager(
 
     fun uriForFile(file: File): Uri =
         FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+
+    /**
+     * Reliably resolves byte size for any SAF, FileProvider, or file:// URI so Recent Files
+     * always displays accurate file sizes consistently across all entries.
+     */
+    suspend fun queryActualFileSize(uri: Uri): Long = withContext(Dispatchers.IO) {
+        if (uri.scheme == "file") {
+            val f = uri.path?.let { File(it) }
+            if (f != null && f.exists()) return@withContext f.length()
+        }
+        val meta = runCatching { queryFileMetadata(uri, null) }.getOrNull()
+        if (meta != null && meta.sizeBytes > 0L) {
+            return@withContext meta.sizeBytes
+        }
+        val afdLen = runCatching {
+            context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: -1L
+        }.getOrDefault(-1L)
+        if (afdLen >= 0L) return@withContext afdLen
+        if (meta != null && meta.sizeBytes == 0L) return@withContext 0L
+        -1L
+    }
 
     fun openInputStream(uri: Uri): InputStream? =
         context.contentResolver.openInputStream(uri)

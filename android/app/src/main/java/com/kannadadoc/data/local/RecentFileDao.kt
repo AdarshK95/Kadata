@@ -21,6 +21,9 @@ interface RecentFileDao {
     @Query("UPDATE recent_files SET displayName = :newDisplayName WHERE uriString = :uriString")
     suspend fun updateDisplayName(uriString: String, newDisplayName: String)
 
+    @Query("UPDATE recent_files SET fileSizeBytes = :sizeBytes WHERE uriString = :uriString")
+    suspend fun updateFileSize(uriString: String, sizeBytes: Long)
+
     @Query("UPDATE recent_files SET converterOverride = :converterId WHERE uriString = :uriString")
     suspend fun updateConverterOverride(uriString: String, converterId: String?)
 

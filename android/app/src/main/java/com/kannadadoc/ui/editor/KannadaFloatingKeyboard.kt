@@ -5,6 +5,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -33,6 +34,7 @@ import androidx.compose.material.icons.automirrored.filled.Backspace
 import androidx.compose.material.icons.automirrored.filled.KeyboardReturn
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.KeyboardHide
 import androidx.compose.material.icons.filled.SpaceBar
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -51,6 +53,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
@@ -77,17 +80,32 @@ enum class KeyboardAnchor {
 
 private enum class KeyboardTab {
     VARNAMALA,
-    CLUSTERS,
+    SUBSCRIPTS,
     NUMBERS
+}
+
+private enum class PopupSectionTab {
+    KAGUNITA,
+    OTTAKSHARA
 }
 
 private data class VariantPopupState(
     val rootKey: String,
     val selectedStem: String,
-    val relatedStems: List<String>
+    val activePopupTab: PopupSectionTab = PopupSectionTab.KAGUNITA
 )
 
 private object KannadaVarnamalaData {
+    // All 34 standard Kannada consonants in Varga + Avargiya order (used to map all 34 consonant+consonant pairs)
+    val all34Consonants: List<String> = listOf(
+        "ಕ", "ಖ", "ಗ", "ಘ", "ಙ",
+        "ಚ", "ಛ", "ಜ", "ಝ", "ಞ",
+        "ಟ", "ಠ", "ಡ", "ಢ", "ಣ",
+        "ತ", "ಥ", "ದ", "ಧ", "ನ",
+        "ಪ", "ಫ", "ಬ", "ಭ", "ಮ",
+        "ಯ", "ರ", "ಲ", "ವ", "ಶ", "ಷ", "ಸ", "ಹ", "ಳ"
+    )
+
     val swaras: List<String> = listOf(
         "ಅ", "ಆ", "ಇ", "ಈ", "ಉ", "ಊ", "ಋ", "ೠ",
         "ಎ", "ಏ", "ಐ", "ಒ", "ಓ", "ಔ", "ಅಂ", "ಅಃ"
@@ -103,34 +121,14 @@ private object KannadaVarnamalaData {
         listOf("ಕ್ಷ", "ಜ್ಞ", "ಱ", "ೞ", "ಌ", "ೡ", "ೱ", "ೲ", "್")
     )
 
-    val subscriptModifiers: List<Pair<String, String>> = listOf(
-        "್ರ" to "್ರ", "್ಯ" to "್ಯ", "್ವ" to "್ವ", "್ನ" to "್ನ", "್ಮ" to "್ಮ",
-        "್ತ" to "್ತ", "್ದ" to "್ದ", "್ಕ" to "್ಕ", "್ಗ" to "್ಗ", "್ಚ" to "್ಚ",
-        "್ಜ" to "್ಜ", "್ಟ" to "್ಟ", "್ಡ" to "್ಡ", "್ಣ" to "್ಣ", "್ಪ" to "್ಪ",
-        "್ಬ" to "್ಬ", "್ಲ" to "್ಲ", "್ಶ" to "್ಶ", "್ಷ" to "್ಷ", "್ಸ" to "್ಸ",
-        "್ಹ" to "್ಹ", "್ಳ" to "್ಳ", "್ಖ" to "್ಖ", "್ಘ" to "್ಘ", "್ಙ" to "್ಙ",
-        "್ಛ" to "್ಛ", "್ಝ" to "್ಝ", "್ಞ" to "್ಞ", "್ಠ" to "್ಠ", "್ಢ" to "್ಢ",
-        "್ಥ" to "್ಥ", "್ಧ" to "್ಧ", "್ಫ" to "್ಫ", "್ಭ" to "್ಭ", "ರ್" to "ರ್"
+    // ONLY Ottakshara Subscripts that attach to the previous letter (34 subscripts + Arkavattu ರ್)
+    // Organized cleanly: most frequent subscripts first, then complete Varga order.
+    val frequentSubscripts: List<Pair<String, String>> = listOf(
+        "್ರ" to "್ರ", "್ಯ" to "್ಯ", "್ವ" to "್ವ", "್ನ" to "್ನ", "್ಮ" to "್ಮ", "್ತ" to "್ತ", "ರ್" to "ರ್"
     )
 
-    val mixedClusters: List<String> = listOf(
-        "ಕ್ಷ", "ಜ್ಞ", "ತ್ರ", "ಶ್ರ", "ಪ್ರ", "ಕ್ರ", "ಗ್ರ", "ದ್ರ", "ಬ್ರ", "ಭ್ರ", "ವ್ರ", "ಸ್ರ", "ಹ್ರ",
-        "ಷ್ಟ್ರ", "ಸ್ತ್ರ", "ನ್ದ್ರ", "ತ್ರ್ಯ", "ಕ್ತ", "ಕ್ಲ", "ಕ್ವ", "ಗ್ನ", "ಗ್ಧ", "ಚ್ಯ", "ಜ್ವ", "ಜ್ಯ",
-        "ಣ್ಯ", "ತ್ಯ", "ತ್ವ", "ತ್ಸ", "ದ್ಯ", "ದ್ವ", "ದ್ಧ", "ಧ್ವ", "ಧ್ಯ", "ನ್ಯ", "ನ್ವ", "ಪ್ತ", "ಪ್ಯ",
-        "ಬ್ದ", "ಭ್ಯ", "ಮ್ಯ", "ಮ್ರ", "ಲ್ಯ", "ವ್ಯ", "ಶ್ಚ", "ಶ್ಯ", "ಶ್ವ", "ಷ್ಟ", "ಷ್ಠ", "ಷ್ಯ",
-        "ಸ್ತ", "ಸ್ಥ", "ಸ್ನ", "ಸ್ಪ", "ಸ್ಮ", "ಸ್ಯ", "ಸ್ವ", "ಹ್ಮ", "ಹ್ಯ", "ಹ್ವ"
-    )
-
-    val doubledClusters: List<String> = listOf(
-        "ಕ್ಕ", "ಗ್ಗ", "ಚ್ಚ", "ಜ್ಜ", "ಟ್ಟ", "ಡ್ಡ", "ಣ್ಣ", "ತ್ತ", "ದ್ದ", "ನ್ನ",
-        "ಪ್ಪ", "ಬ್ಬ", "ಮ್ಮ", "ಯ್ಯ", "ರ್ರ", "ಲ್ಲ", "ವ್ವ", "ಶ್ಶ", "ಸ್ಸ", "ಳ್ಳ"
-    )
-
-    val arkavattuAndNasalClusters: List<String> = listOf(
-        "ರ್ಕ", "ರ್ಗ", "ರ್ಚ", "ರ್ಜ", "ರ್ಣ", "ರ್ತ", "ರ್ಥ", "ರ್ದ", "ರ್ಧ", "ರ್ನ",
-        "ರ್ಪ", "ರ್ಬ", "ರ್ಭ", "ರ್ಮ", "ರ್ಯ", "ರ್ಲ", "ರ್ವ", "ರ್ಶ", "ರ್ಷ", "ರ್ಸ", "ರ್ಹ",
-        "ಂಕ", "ಂಗ", "ಂಚ", "ಂಜ", "ಂಟ", "ಂಡ", "ಂತ", "ಂದ", "ಂಪ", "ಂಬ", "ಂಸ"
-    )
+    val allSubscriptsInVargaOrder: List<Pair<String, String>> =
+        all34Consonants.map { c -> "್$c" to "್$c" }
 
     val kannadaNumerals: List<String> = listOf("೦", "೧", "೨", "೩", "೪", "೫", "೬", "೭", "೮", "೯")
     val arabicNumerals: List<String> = listOf("0", "1", "2", "3", "4", "5", "6", "7", "8", "9")
@@ -162,39 +160,90 @@ private object KannadaVarnamalaData {
         "್" to listOf("್", "ಂ", "ಃ", "ಁ", "ಽ", "಼", "ೢ", "ೣ")
     )
 
-    private val specialConjunctStems: Map<String, List<String>> = mapOf(
-        "ಕ" to listOf("ಕ", "ಕ್ಕ", "ಕ್ಷ", "ಕ್ರ", "ಕ್ಯ"),
-        "ಗ" to listOf("ಗ", "ಗ್ಗ", "ಗ್ರ", "ಗ್ಯ", "ಗ್ನ"),
-        "ಚ" to listOf("ಚ", "ಚ್ಚ", "ಚ್ಯ"),
-        "ಜ" to listOf("ಜ", "ಜ್ಜ", "ಜ್ಞ", "ಜ್ರ", "ಜ್ವ"),
-        "ಟ" to listOf("ಟ", "ಟ್ಟ", "ಟ್ರ", "ಟ್ಯ"),
-        "ಡ" to listOf("ಡ", "ಡ್ಡ", "ಡ್ರ", "ಡ್ಯ"),
-        "ಣ" to listOf("ಣ", "ಣ್ಣ", "ಣ್ಯ"),
-        "ತ" to listOf("ತ", "ತ್ತ", "ತ್ರ", "ತ್ಯ", "ತ್ವ"),
-        "ದ" to listOf("ದ", "ದ್ದ", "ದ್ರ", "ದ್ಯ", "ದ್ವ"),
-        "ಧ" to listOf("ಧ", "ಧ್ರ", "ಧ್ಯ", "ಧ್ವ"),
-        "ನ" to listOf("ನ", "ನ್ನ", "ನ್ಯ", "ನ್ವ"),
-        "ಪ" to listOf("ಪ", "ಪ್ಪ", "ಪ್ರ", "ಪ್ಯ", "ಪ್ತ"),
-        "ಬ" to listOf("ಬ", "ಬ್ಬ", "ಬ್ರ", "ಬ್ಯ"),
-        "ಭ" to listOf("ಭ", "ಭ್ರ", "ಭ್ಯ"),
-        "ಮ" to listOf("ಮ", "ಮ್ಮ", "ಮ್ರ", "ಮ್ಯ"),
-        "ಯ" to listOf("ಯ", "ಯ್ಯ"),
-        "ರ" to listOf("ರ", "ರ್ರ", "ರ್ಯ"),
-        "ಲ" to listOf("ಲ", "ಲ್ಲ", "ಲ್ಯ"),
-        "ವ" to listOf("ವ", "ವ್ವ", "ವ್ರ", "ವ್ಯ"),
-        "ಶ" to listOf("ಶ", "ಶ್ಶ", "ಶ್ರ", "ಶ್ವ", "ಶ್ಯ"),
-        "ಷ" to listOf("ಷ", "ಷ್ಟ", "ಷ್ಠ", "ಷ್ಟ್ರ", "ಷ್ಯ"),
-        "ಸ" to listOf("ಸ", "ಸ್ಸ", "ಸ್ತ", "ಸ್ಥ", "ಸ್ವ", "ಸ್ತ್ರ"),
-        "ಹ" to listOf("ಹ", "ಹ್ರ", "ಹ್ಮ", "ಹ್ಯ", "ಹ್ವ"),
-        "ಳ" to listOf("ಳ", "ಳ್ಳ", "ಳ್ಯ")
+    // Priority literary / special conjuncts per letter (including 3-consonant clusters like ಕ್ಷ್ಮ, ತ್ರ್ಯ, ಷ್ಟ್ರ, ಸ್ತ್ರ, ನ್ದ್ರ)
+    private val specialClustersForConsonant: Map<String, List<String>> = mapOf(
+        "ಕ" to listOf("ಕ್ಕ", "ಕ್ಷ", "ಕ್ರ", "ಕ್ಯ", "ಕ್ತ", "ಕ್ಮ", "ಕ್ವ", "ಕ್ಲ", "ಕ್ನ", "ಕ್ಷ್ಮ", "ಕ್ಷ್ಯ", "ರ್ಕ", "ಂಕ"),
+        "ಖ" to listOf("ಖ್ಖ", "ಖ್ಯ", "ಖ್ರ", "ಖ್ವ", "ರ್ಖ", "ಂಖ"),
+        "ಗ" to listOf("ಗ್ಗ", "ಗ್ರ", "ಗ್ಯ", "ಗ್ನ", "ಗ್ಧ", "ಗ್ಮ", "ಗ್ವ", "ಗ್ಲ", "ರ್ಗ", "ಂಗ"),
+        "ಘ" to listOf("ಘ್ಘ", "ಘ್ರ", "ಘ್ಯ", "ಘ್ನ", "ರ್ಘ", "ಂಘ"),
+        "ಙ" to listOf("ಙ್ಕ", "ಙ್ಗ", "ಙ್ಖ", "ಙ್ಘ", "ಙ್ಙ"),
+        "ಚ" to listOf("ಚ್ಚ", "ಚ್ಛ", "ಚ್ಯ", "ಚ್ರ", "ಚ್ವ", "ರ್ಚ", "ಂಚ"),
+        "ಛ" to listOf("ಛ್ಛ", "ಛ್ಯ", "ಛ್ರ", "ಛ್ವ", "ರ್ಛ", "ಂಛ"),
+        "ಜ" to listOf("ಜ್ಜ", "ಜ್ಞ", "ಜ್ರ", "ಜ್ಯ", "ಜ್ವ", "ಜ್ಮ", "ರ್ಜ", "ಂಜ"),
+        "ಝ" to listOf("ಝ್ಝ", "ಝ್ಯ", "ಝ್ರ", "ರ್ಝ", "ಂಝ"),
+        "ಞ" to listOf("ಞ್ಚ", "ಞ್ಜ", "ಞ್ಛ", "ಞ್ಞ"),
+        "ಟ" to listOf("ಟ್ಟ", "ಟ್ರ", "ಟ್ಯ", "ಟ್ವ", "ಟ್ಮ", "ರ್ಟ", "ಂಟ"),
+        "ಠ" to listOf("ಠ್ಠ", "ಠ್ಯ", "ಠ್ರ", "ರ್ಠ", "ಂಠ"),
+        "ಡ" to listOf("ಡ್ಡ", "ಡ್ರ", "ಡ್ಯ", "ಡ್ವ", "ಡ್ಮ", "ರ್ಡ", "ಂಡ"),
+        "ಢ" to listOf("ಢ್ಢ", "ಢ್ಯ", "ಢ್ರ", "ರ್ಢ", "ಂಢ"),
+        "ಣ" to listOf("ಣ್ಣ", "ಣ್ಯ", "ಣ್ವ", "ಣ್ಮ", "ಣ್ಟ", "ಣ್ಡ", "ರ್ಣ", "ಂಣ"),
+        "ತ" to listOf("ತ್ತ", "ತ್ರ", "ತ್ರ್ಯ", "ತ್ಯ", "ತ್ವ", "ತ್ಸ", "ತ್ನ", "ತ್ಮ", "ತ್ಪ", "ತ್ಕ", "ರ್ತ", "ಂತ"),
+        "ಥ" to listOf("ಥ್ಥ", "ಥ್ಯ", "ಥ್ರ", "ಥ್ವ", "ರ್ಥ", "ಂಥ"),
+        "ದ" to listOf("ದ್ದ", "ದ್ರ", "ದ್ಯ", "ದ್ವ", "ದ್ಧ", "ದ್ಮ", "ದ್ಗ", "ದ್ಭ", "ದ್ಬ", "ರ್ದ", "ಂದ"),
+        "ಧ" to listOf("ದ್ಧ", "ಧ್ರ", "ಧ್ಯ", "ಧ್ವ", "ಧ್ಮ", "ಧ್ನ", "ರ್ಧ", "ಂಧ"),
+        "ನ" to listOf("ನ್ನ", "ನ್ಯ", "ನ್ವ", "ನ್ಮ", "ನ್ತ", "ನ್ದ", "ನ್ದ್ರ", "ನ್ಸ", "ರ್ನ", "ಂನ"),
+        "ಪ" to listOf("ಪ್ಪ", "ಪ್ರ", "ಪ್ಯ", "ಪ್ತ", "ಪ್ಲ", "ಪ್ವ", "ಪ್ನ", "ಪ್ಮ", "ರ್ಪ", "ಂಪ"),
+        "ಫ" to listOf("ಫ್ಫ", "ಫ್ರ", "ಫ್ಯ", "ಫ್ಲ", "ರ್ಫ", "ಂಫ"),
+        "ಬ" to listOf("ಬ್ಬ", "ಬ್ರ", "ಬ್ಯ", "ಬ್ದ", "ಬ್ಜ", "ಬ್ಧ", "ಬ್ಲ", "ಬ್ವ", "ರ್ಬ", "ಂಬ"),
+        "ಭ" to listOf("ಭ್ಭ", "ಭ್ರ", "ಭ್ಯ", "ಭ್ವ", "ರ್ಭ", "ಂಭ"),
+        "ಮ" to listOf("ಮ್ಮ", "ಮ್ರ", "ಮ್ಯ", "ಮ್ಲ", "ಮ್ವ", "ಮ್ನ", "ಮ್ಪ", "ಮ್ಬ", "ರ್ಮ", "ಂಮ"),
+        "ಯ" to listOf("ಯ್ಯ", "ಯ್ರ", "ಯ್ವ", "ರ್ಯ", "ಂಯ"),
+        "ರ" to listOf("ರ್ರ", "ರ್ಯ", "ರ್ವ", "ರ್ಮ", "ರ್ತ", "ರ್ದ", "ರ್ಕ", "ರ್ನ", "ರ್ಪ", "ರ್ಸ"),
+        "ಲ" to listOf("ಲ್ಲ", "ಲ್ಯ", "ಲ್ವ", "ಲ್ಕ", "ಲ್ಪ", "ಲ್ಮ", "ಲ್ಗ", "ರ್ಲ", "ಂಲ"),
+        "ವ" to listOf("ವ್ವ", "ವ್ರ", "ವ್ಯ", "ವ್ಲ", "ವ್ನ", "ರ್ವ", "ಂವ"),
+        "ಶ" to listOf("ಶ್ಶ", "ಶ್ರ", "ಶ್ಯ", "ಶ್ವ", "ಶ್ಚ", "ಶ್ಲ", "ಶ್ನ", "ಶ್ಮ", "ರ್ಶ", "ಂಶ"),
+        "ಷ" to listOf("ಷ್ಷ", "ಷ್ಟ", "ಷ್ಠ", "ಷ್ಟ್ರ", "ಷ್ಯ", "ಷ್ಮ", "ಷ್ಣ", "ಷ್ಪ", "ಷ್ಕ", "ಷ್ವ", "ರ್ಷ", "ಂಷ"),
+        "ಸ" to listOf("ಸ್ಸ", "ಸ್ತ", "ಸ್ಥ", "ಸ್ತ್ರ", "ಸ್ರ", "ಸ್ವ", "ಸ್ಮ", "ಸ್ನ", "ಸ್ಪ", "ಸ್ಯ", "ಸ್ಕ", "ಸ್ಲ", "ರ್ಸ", "ಂಸ"),
+        "ಹ" to listOf("ಹ್ಹ", "ಹ್ರ", "ಹ್ಮ", "ಹ್ಯ", "ಹ್ವ", "ಹ್ನ", "ಹ್ಲ", "ರ್ಹ", "ಂಹ"),
+        "ಳ" to listOf("ಳ್ಳ", "ಳ್ಯ", "ಳ್ವ", "ಳ್ಮ", "ರ್ಳ", "ಂಳ")
     )
 
-    fun relatedStemsForKey(key: String): List<String> {
-        if (vowelVariantsMap.containsKey(key)) return listOf(key)
-        specialConjunctStems[key]?.let { return it }
-        return if (key.length == 1) listOf(key, "${key}್${key}") else listOf(key)
+    fun isConsonantKey(key: String): Boolean = !vowelVariantsMap.containsKey(key)
+
+    /**
+     * Quick-switch stem chips shown at the top of the Kagunita tab for a letter (base + top clusters).
+     */
+    fun quickStemsForLetter(rootKey: String, selectedStem: String): List<String> {
+        if (!isConsonantKey(rootKey)) return listOf(rootKey)
+        val list = linkedSetOf(rootKey)
+        if (selectedStem != rootKey) list.add(selectedStem)
+        specialClustersForConsonant[rootKey]?.let { list.addAll(it) }
+            ?: run {
+                if (rootKey.length == 1) {
+                    list.add("${rootKey}್${rootKey}")
+                    list.add("ರ್$rootKey")
+                    list.add("ಂ$rootKey")
+                }
+            }
+        return list.toList()
     }
 
+    /**
+     * Special / Doubled / Arkavattu / Nasal clusters for a consonant (shown in Section 1 of Ottakshara tab).
+     */
+    fun featuredClustersForLetter(rootKey: String): List<String> {
+        if (!isConsonantKey(rootKey)) return emptyList()
+        specialClustersForConsonant[rootKey]?.let { return it }
+        return if (rootKey.length == 1) {
+            listOf("${rootKey}್${rootKey}", "ರ್$rootKey", "ಂ$rootKey", "${rootKey}್ರ", "${rootKey}್ಯ", "${rootKey}್ವ")
+        } else {
+            listOf("ರ್$rootKey", "ಂ$rootKey", "${rootKey}್ರ", "${rootKey}್ಯ")
+        }
+    }
+
+    /**
+     * Complete 34-consonant ottakshara matrix for ANY consonant X: X + ್ + every Kannada consonant (ಕ..ಳ).
+     * For example, for ಕ -> ಕ್ಕ, ಕ್ಖ, ಕ್ಗ, ... ಕ್ಮ, ಕ್ಯ, ಕ್ರ, ಕ್ಲ, ಕ್ವ, ಕ್ಶ, ಕ್ಷ, ಕ್ಸ, ಕ್ಹ, ಕ್ಳ.
+     */
+    fun all34ConjunctsForLetter(rootKey: String): List<String> {
+        if (!isConsonantKey(rootKey)) return emptyList()
+        return all34Consonants.map { c2 -> "${rootKey}್${c2}" }
+    }
+
+    /**
+     * Full canonical Kagunita (17 forms) for any consonant or conjunct stem:
+     * X, X್, Xಾ, Xಿ, Xೀ, Xು, Xೂ, Xೃ, Xೄ, Xೆ, Xೇ, Xೈ, Xೊ, Xೋ, Xೌ, Xಂ, Xಃ
+     */
     fun variantsForStem(stem: String): List<String> {
         vowelVariantsMap[stem]?.let { return it }
         return listOf(
@@ -220,17 +269,27 @@ private object KannadaVarnamalaData {
 }
 
 /**
- * Draggable 4-corner hover button rendered strictly inside the editor canvas Box
- * ONLY while the keyboard is closed. Default anchor: Bottom-Left; snaps to BL/BR/TL/TR.
+ * Draggable 4-corner dual floating buttons rendered strictly inside the editor canvas Box
+ * ONLY while the built-in Kannada keyboard is closed:
+ * - Top button ("ಕ"): opens Kadata's built-in Kannada Varnamala keyboard.
+ * - Bottom button (⌨️): ALWAYS shown right below "ಕ":
+ *     • Tap = toggles the default system keyboard open / closed.
+ *     • Long-press = opens Android's Input Method Picker so the user can switch keyboards.
+ * Both buttons drag and snap together to any of the 4 corners (BL / BR / TL / TR).
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun FloatingKeyboardToggleButton(
+fun FloatingKeyboardActionButtons(
     anchor: KeyboardAnchor,
+    isSystemKeyboardOpen: Boolean,
     onAnchorChange: (KeyboardAnchor) -> Unit,
-    onOpenKeyboard: () -> Unit,
+    onOpenKannadaKeyboard: () -> Unit,
+    onToggleSystemKeyboard: () -> Unit,
+    onPickSystemKeyboard: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val density = LocalDensity.current
+    val haptic = LocalHapticFeedback.current
     var isDragging by remember { mutableStateOf(false) }
     var dragX by remember { mutableFloatStateOf(0f) }
     var dragY by remember { mutableFloatStateOf(0f) }
@@ -238,37 +297,35 @@ fun FloatingKeyboardToggleButton(
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
         val boxWidthPx = with(density) { maxWidth.toPx() }
         val boxHeightPx = with(density) { maxHeight.toPx() }
-        val buttonSizeDp = 44.dp
-        val buttonSizePx = with(density) { buttonSizeDp.toPx() }
+        val buttonWidthDp = 44.dp
+        val gapDp = 8.dp
+        val stackHeightDp = buttonWidthDp * 2 + gapDp
+        val stackWidthPx = with(density) { buttonWidthDp.toPx() }
+        val stackHeightPx = with(density) { stackHeightDp.toPx() }
         val marginPx = with(density) { 12.dp.toPx() }
 
         val anchorX = when (anchor) {
             KeyboardAnchor.BOTTOM_LEFT, KeyboardAnchor.TOP_LEFT -> marginPx
             KeyboardAnchor.BOTTOM_RIGHT, KeyboardAnchor.TOP_RIGHT ->
-                (boxWidthPx - buttonSizePx - marginPx).coerceAtLeast(marginPx)
+                (boxWidthPx - stackWidthPx - marginPx).coerceAtLeast(marginPx)
         }
         val anchorY = when (anchor) {
             KeyboardAnchor.TOP_LEFT, KeyboardAnchor.TOP_RIGHT -> marginPx
             KeyboardAnchor.BOTTOM_LEFT, KeyboardAnchor.BOTTOM_RIGHT ->
-                (boxHeightPx - buttonSizePx - marginPx).coerceAtLeast(marginPx)
+                (boxHeightPx - stackHeightPx - marginPx).coerceAtLeast(marginPx)
         }
 
         val currentX = if (isDragging) dragX else anchorX
         val currentY = if (isDragging) dragY else anchorY
 
-        Surface(
-            onClick = onOpenKeyboard,
-            shape = RoundedCornerShape(12.dp),
-            color = MaterialTheme.colorScheme.primary,
-            contentColor = MaterialTheme.colorScheme.onPrimary,
-            shadowElevation = 6.dp,
-            border = BorderStroke(
-                width = 1.dp,
-                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.65f)
-            ),
+        val btnShape = RoundedCornerShape(12.dp)
+        val borderColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.65f)
+
+        Column(
+            verticalArrangement = Arrangement.spacedBy(gapDp),
+            horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier
                 .offset { IntOffset(currentX.roundToInt(), currentY.roundToInt()) }
-                .size(buttonSizeDp)
                 .zIndex(20f)
                 .pointerInput(boxWidthPx, boxHeightPx, anchor) {
                     detectDragGestures(
@@ -281,16 +338,16 @@ fun FloatingKeyboardToggleButton(
                             change.consume()
                             dragX = (dragX + dragAmount.x).coerceIn(
                                 marginPx,
-                                (boxWidthPx - buttonSizePx - marginPx).coerceAtLeast(marginPx)
+                                (boxWidthPx - stackWidthPx - marginPx).coerceAtLeast(marginPx)
                             )
                             dragY = (dragY + dragAmount.y).coerceIn(
                                 marginPx,
-                                (boxHeightPx - buttonSizePx - marginPx).coerceAtLeast(marginPx)
+                                (boxHeightPx - stackHeightPx - marginPx).coerceAtLeast(marginPx)
                             )
                         },
                         onDragEnd = {
-                            val centerX = dragX + buttonSizePx / 2f
-                            val centerY = dragY + buttonSizePx / 2f
+                            val centerX = dragX + stackWidthPx / 2f
+                            val centerY = dragY + stackHeightPx / 2f
                             val leftHalf = centerX < boxWidthPx / 2f
                             val topHalf = centerY < boxHeightPx / 2f
                             onAnchorChange(
@@ -309,11 +366,65 @@ fun FloatingKeyboardToggleButton(
                     )
                 }
         ) {
-            Box(contentAlignment = Alignment.Center) {
+            // Top Button: Kannada Letter 'ಕ' -> Opens Kadata Kannada Varnamala Keyboard
+            Box(
+                modifier = Modifier
+                    .size(buttonWidthDp)
+                    .shadow(6.dp, btnShape)
+                    .clip(btnShape)
+                    .background(MaterialTheme.colorScheme.primary)
+                    .border(1.dp, borderColor, btnShape)
+                    .clickable(onClick = onOpenKannadaKeyboard),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "ಕ",
+                    color = MaterialTheme.colorScheme.onPrimary,
+                    fontSize = 21.sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center
+                )
+            }
+
+            // Bottom Button: System Keyboard Trigger
+            // • Tap = toggle default OS keyboard open / closed
+            // • Long-press = open Android's Input Method Picker (switch keyboards)
+            val sysBg = if (isSystemKeyboardOpen) {
+                MaterialTheme.colorScheme.tertiary
+            } else {
+                MaterialTheme.colorScheme.secondary
+            }
+            val sysFg = if (isSystemKeyboardOpen) {
+                MaterialTheme.colorScheme.onTertiary
+            } else {
+                MaterialTheme.colorScheme.onSecondary
+            }
+
+            Box(
+                modifier = Modifier
+                    .size(buttonWidthDp)
+                    .shadow(6.dp, btnShape)
+                    .clip(btnShape)
+                    .background(sysBg)
+                    .border(1.dp, borderColor, btnShape)
+                    .combinedClickable(
+                        onClick = onToggleSystemKeyboard,
+                        onLongClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            onPickSystemKeyboard()
+                        }
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
                 Icon(
-                    imageVector = Icons.Default.Keyboard,
-                    contentDescription = "Open Kannada Keyboard",
-                    modifier = Modifier.size(22.dp)
+                    imageVector = if (isSystemKeyboardOpen) Icons.Default.KeyboardHide else Icons.Default.Keyboard,
+                    contentDescription = if (isSystemKeyboardOpen) {
+                        "Close System Keyboard (Long-press to switch)"
+                    } else {
+                        "Open System Keyboard (Long-press to switch)"
+                    },
+                    tint = sysFg,
+                    modifier = Modifier.size(21.dp)
                 )
             }
         }
@@ -321,14 +432,7 @@ fun FloatingKeyboardToggleButton(
 }
 
 /**
- * Adaptive Kannada Varnamala & Conjunct Clusters Keyboard Pane:
- * - Phone / Compact mode (isTabletSideMode = false):
- *     Docked flush at the bottom half, strictly capped <= 50% screen height so the top half
- *     is always the document. Includes bottom-right corner resizer grip.
- * - Tablet Side-by-Side mode (isTabletSideMode = true):
- *     Sits on the left side while the document moves to the right and fills all remaining width
- *     and full height. Does NOT enforce the 50% bottom-half cap (freely resizable up to 88% height
- *     and 52% width) and reports its top-edge limit so the cursor line always stays above it.
+ * Adaptive Kannada Varnamala & Ottakshara Subscripts Keyboard Pane.
  */
 @Composable
 fun KannadaKeyboardPane(
@@ -364,7 +468,7 @@ fun KannadaKeyboardPane(
     }
     val minAllowedWidth = 280.dp.coerceAtMost(maxAllowedWidth)
     val defaultWidth = if (isTabletSideMode) {
-        minOf(maxAllowedWidth, 410.dp)
+        minOf(maxAllowedWidth, 420.dp)
     } else {
         minOf(maxAllowedWidth, 580.dp)
     }
@@ -380,7 +484,6 @@ fun KannadaKeyboardPane(
     val panelHeight = customHeightDp.dp.coerceIn(minAllowedHeight, maxAllowedHeight)
     val panelWidth = customWidthDp.dp.coerceIn(minAllowedWidth, maxAllowedWidth)
 
-    // Report keyboard's top Y limit (in CSS px ~ dp) to Editor JS so cursor always stays above it
     LaunchedEffect(panelHeight, totalScreenHeight, isTabletSideMode) {
         val topLimitDp = (totalScreenHeight - panelHeight).value.roundToInt().coerceAtLeast(0)
         onTopLimitChanged(topLimitDp)
@@ -435,7 +538,7 @@ fun KannadaKeyboardPane(
                         .padding(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 6.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    // Header: Back arrow (when in Clusters/Numbers) + Tab Switcher + Close (X) button
+                    // Header: Back arrow (when in Subscripts/Numbers) + Tabs + Close (X)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
@@ -475,14 +578,14 @@ fun KannadaKeyboardPane(
                                 }
                             )
                             FilterChip(
-                                selected = activeTab == KeyboardTab.CLUSTERS,
+                                selected = activeTab == KeyboardTab.SUBSCRIPTS,
                                 onClick = {
                                     variantPopup = null
-                                    activeTab = KeyboardTab.CLUSTERS
+                                    activeTab = KeyboardTab.SUBSCRIPTS
                                 },
                                 label = {
                                     Text(
-                                        text = if (knOnly) "ಒತ್ತಕ್ಷರ" else "ಒತ್ತಕ್ಷರ / Clusters",
+                                        text = if (knOnly) "ಒತ್ತಕ್ಷರ" else "ಒತ್ತಕ್ಷರ (Subscripts)",
                                         fontSize = 12.sp,
                                         fontWeight = FontWeight.SemiBold
                                     )
@@ -519,11 +622,11 @@ fun KannadaKeyboardPane(
                     Text(
                         text = when (activeTab) {
                             KeyboardTab.VARNAMALA ->
-                                if (knOnly) "ಕಾಗುಣಿತ ಮತ್ತು ಒತ್ತಕ್ಷರಗಳಿಗೆ ಯಾವುದೇ ಅಕ್ಷರವನ್ನು ಒತ್ತಿ ಹಿಡಿಯಿರಿ"
-                                else "Hold any letter for all Kagunita (ಕಾಗುಣಿತ) & conjunct combinations"
-                            KeyboardTab.CLUSTERS ->
-                                if (knOnly) "ಒತ್ತಕ್ಷರ ಚಿಹ್ನೆ ಒತ್ತಿರಿ ಅಥವಾ ಸಂಯುಕ್ತಾಕ್ಷರ ಒತ್ತಿ ಹಿಡಿಯಿರಿ"
-                                else "Tap subscript to attach, or hold any cluster for ಕಾಗುಣಿತ"
+                                if (knOnly) "ಕಾಗುಣಿತ ಮತ್ತು ಎಲ್ಲಾ ಒತ್ತಕ್ಷರ ಸಂಯೋಜನೆಗಳಿಗೆ ಅಕ್ಷರವನ್ನು ಒತ್ತಿ ಹಿಡಿಯಿರಿ"
+                                else "Hold any letter for Kagunita (ಕಾಗುಣಿತ) & all 34+ Ottakshara combinations"
+                            KeyboardTab.SUBSCRIPTS ->
+                                if (knOnly) "ಹಿಂದಿನ ಅಕ್ಷರಕ್ಕೆ ಒತ್ತಕ್ಷರ ಸೇರಿಸಲು ಕೆಳಗಿನ ಚಿಹ್ನೆ ಒತ್ತಿರಿ"
+                                else "Tap any subscript to attach directly to the previous letter"
                             KeyboardTab.NUMBERS ->
                                 if (knOnly) "ಕನ್ನಡ ಅಂಕಿಗಳು ಮತ್ತು ವಿರಾಮ ಚಿಹ್ನೆಗಳು"
                                 else "Kannada numerals, digits & punctuation"
@@ -535,7 +638,7 @@ fun KannadaKeyboardPane(
                         modifier = Modifier.padding(horizontal = 4.dp)
                     )
 
-                    // Scrollable Key Grid dynamically filling panel height
+                    // Scrollable Key Grid Body
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -555,7 +658,7 @@ fun KannadaKeyboardPane(
                                             variantPopup = VariantPopupState(
                                                 rootKey = key,
                                                 selectedStem = key,
-                                                relatedStems = KannadaVarnamalaData.relatedStemsForKey(key)
+                                                activePopupTab = PopupSectionTab.KAGUNITA
                                             )
                                         }
                                     )
@@ -576,101 +679,61 @@ fun KannadaKeyboardPane(
                                             variantPopup = VariantPopupState(
                                                 rootKey = key,
                                                 selectedStem = key,
-                                                relatedStems = KannadaVarnamalaData.relatedStemsForKey(key)
+                                                activePopupTab = PopupSectionTab.KAGUNITA
                                             )
                                         }
                                     )
                                 }
                             }
 
-                            KeyboardTab.CLUSTERS -> {
+                            // ONLY Attaching Ottakshara Subscripts here (clusters/doubled/arkavattu live in each letter's long-press!)
+                            KeyboardTab.SUBSCRIPTS -> {
                                 SectionMiniLabel(
-                                    if (knOnly) "ಒತ್ತಕ್ಷರ ಚಿಹ್ನೆಗಳು (ಹಿಂದಿನ ಅಕ್ಷರಕ್ಕೆ ಸೇರುತ್ತದೆ)"
-                                    else "Ottakshara Subscripts (attaches to previous letter)"
+                                    if (knOnly) "ಪ್ರಮುಖ ಒತ್ತಕ್ಷರ ಚಿಹ್ನೆಗಳು"
+                                    else "Frequent Subscripts (attaches to previous letter)"
                                 )
-                                KannadaVarnamalaData.subscriptModifiers.chunked(7).forEach { chunk ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    KannadaVarnamalaData.frequentSubscripts.forEach { (display, insertVal) ->
+                                        KeyboardKeyButton(
+                                            label = if (insertVal == "ರ್") "ರ್" else "◌$display",
+                                            isAccent = true,
+                                            showVariantDot = false,
+                                            onTap = { onInsertText(insertVal, insertVal != "ರ್") },
+                                            onLongPress = null,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                    }
+                                }
+
+                                HorizontalDivider(
+                                    modifier = Modifier.padding(vertical = 2.dp),
+                                    color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
+                                )
+
+                                SectionMiniLabel(
+                                    if (knOnly) "ಎಲ್ಲಾ 34 ಒತ್ತಕ್ಷರ ಚಿಹ್ನೆಗಳು (ವರ್ಗ ಕ್ರಮ)"
+                                    else "All 34 Ottakshara Subscripts (Varga order)"
+                                )
+                                KannadaVarnamalaData.allSubscriptsInVargaOrder.chunked(7).forEach { chunk ->
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                                     ) {
                                         chunk.forEach { (display, insertVal) ->
                                             KeyboardKeyButton(
-                                                label = if (insertVal == "ರ್") "ರ್" else "◌$display",
-                                                isAccent = true,
+                                                label = "◌$display",
+                                                isAccent = false,
                                                 showVariantDot = false,
-                                                onTap = { onInsertText(insertVal, insertVal != "ರ್") },
+                                                onTap = { onInsertText(insertVal, true) },
                                                 onLongPress = null,
                                                 modifier = Modifier.weight(1f)
                                             )
                                         }
                                         repeat(7 - chunk.size) { Spacer(Modifier.weight(1f)) }
                                     }
-                                }
-
-                                HorizontalDivider(
-                                    modifier = Modifier.padding(vertical = 3.dp),
-                                    color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
-                                )
-
-                                SectionMiniLabel(
-                                    if (knOnly) "ಸಂಯುಕ್ತಾಕ್ಷರಗಳು (ಕಾಗುಣಿತಕ್ಕೆ ಒತ್ತಿ ಹಿಡಿಯಿರಿ)"
-                                    else "Consonant Clusters (hold any for ಕಾಗುಣಿತ)"
-                                )
-                                KannadaVarnamalaData.mixedClusters.chunked(7).forEach { chunk ->
-                                    KeyRow(
-                                        keys = chunk,
-                                        columns = 7,
-                                        isVowelRow = false,
-                                        showVariantDot = true,
-                                        onTap = { onInsertText(it, false) },
-                                        onLongPress = { key ->
-                                            variantPopup = VariantPopupState(
-                                                rootKey = key,
-                                                selectedStem = key,
-                                                relatedStems = KannadaVarnamalaData.relatedStemsForKey(key)
-                                            )
-                                        }
-                                    )
-                                }
-
-                                SectionMiniLabel(
-                                    if (knOnly) "ದ್ವಿತ್ವ ಒತ್ತಕ್ಷರಗಳು" else "Doubled Consonants (ಸಜಾತೀಯ)"
-                                )
-                                KannadaVarnamalaData.doubledClusters.chunked(7).forEach { chunk ->
-                                    KeyRow(
-                                        keys = chunk,
-                                        columns = 7,
-                                        isVowelRow = false,
-                                        showVariantDot = true,
-                                        onTap = { onInsertText(it, false) },
-                                        onLongPress = { key ->
-                                            variantPopup = VariantPopupState(
-                                                rootKey = key,
-                                                selectedStem = key,
-                                                relatedStems = KannadaVarnamalaData.relatedStemsForKey(key)
-                                            )
-                                        }
-                                    )
-                                }
-
-                                SectionMiniLabel(
-                                    if (knOnly) "ಅರ್ಕಾವತ್ತು ಮತ್ತು ಅನುಸ್ವಾರ" else "Arkavattu & Nasal Clusters"
-                                )
-                                KannadaVarnamalaData.arkavattuAndNasalClusters.chunked(7).forEach { chunk ->
-                                    KeyRow(
-                                        keys = chunk,
-                                        columns = 7,
-                                        isVowelRow = false,
-                                        showVariantDot = true,
-                                        onTap = { onInsertText(it, false) },
-                                        onLongPress = { key ->
-                                            variantPopup = VariantPopupState(
-                                                rootKey = key,
-                                                selectedStem = key,
-                                                relatedStems = KannadaVarnamalaData.relatedStemsForKey(key)
-                                            )
-                                        }
-                                    )
                                 }
                             }
 
@@ -718,13 +781,14 @@ fun KannadaKeyboardPane(
                         horizontalArrangement = Arrangement.spacedBy(5.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        // Clean non-clipping switch button (Varnamala <-> Subscripts)
                         Surface(
                             onClick = {
                                 variantPopup = null
-                                activeTab = if (activeTab == KeyboardTab.CLUSTERS) {
+                                activeTab = if (activeTab == KeyboardTab.SUBSCRIPTS) {
                                     KeyboardTab.VARNAMALA
                                 } else {
-                                    KeyboardTab.CLUSTERS
+                                    KeyboardTab.SUBSCRIPTS
                                 }
                             },
                             shape = RoundedCornerShape(8.dp),
@@ -732,14 +796,16 @@ fun KannadaKeyboardPane(
                             contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
                             modifier = Modifier
                                 .height(36.dp)
-                                .weight(1.3f)
+                                .weight(1.45f)
                         ) {
                             Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(horizontal = 4.dp)) {
                                 Text(
-                                    text = if (activeTab == KeyboardTab.CLUSTERS) "← ವರ್ಣಮಾಲೆ" else "ಒತ್ತಕ್ಷರ",
-                                    fontSize = 12.sp,
+                                    text = if (activeTab == KeyboardTab.SUBSCRIPTS) "ವರ್ಣಮಾಲೆ" else "ಒತ್ತಕ್ಷರ",
+                                    fontSize = 11.5.sp,
                                     fontWeight = FontWeight.SemiBold,
-                                    maxLines = 1
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
@@ -751,7 +817,7 @@ fun KannadaKeyboardPane(
                             contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
                             modifier = Modifier
                                 .height(36.dp)
-                                .weight(0.7f)
+                                .weight(0.68f)
                         ) {
                             Box(contentAlignment = Alignment.Center) {
                                 Text("◌್", fontSize = 16.sp, fontWeight = FontWeight.Bold)
@@ -765,7 +831,7 @@ fun KannadaKeyboardPane(
                             contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier
                                 .height(36.dp)
-                                .weight(2.0f)
+                                .weight(1.9f)
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -773,7 +839,7 @@ fun KannadaKeyboardPane(
                             ) {
                                 Icon(Icons.Default.SpaceBar, contentDescription = "Space", modifier = Modifier.size(17.dp))
                                 Spacer(Modifier.width(4.dp))
-                                Text(if (knOnly) "ಸ್ಪೇಸ್" else "Space", fontSize = 12.sp)
+                                Text(if (knOnly) "ಸ್ಪೇಸ್" else "Space", fontSize = 12.sp, maxLines = 1)
                             }
                         }
 
@@ -784,7 +850,7 @@ fun KannadaKeyboardPane(
                             contentColor = MaterialTheme.colorScheme.onSurface,
                             modifier = Modifier
                                 .height(36.dp)
-                                .weight(0.9f)
+                                .weight(0.88f)
                         ) {
                             Box(contentAlignment = Alignment.Center) {
                                 Icon(
@@ -802,7 +868,7 @@ fun KannadaKeyboardPane(
                             contentColor = MaterialTheme.colorScheme.onPrimary,
                             modifier = Modifier
                                 .height(36.dp)
-                                .weight(0.9f)
+                                .weight(0.88f)
                         ) {
                             Box(contentAlignment = Alignment.Center) {
                                 Icon(
@@ -813,7 +879,7 @@ fun KannadaKeyboardPane(
                             }
                         }
 
-                        // Bottom-Right Corner Resizer Grip (width & height)
+                        // Bottom-Right Corner Resizer Grip
                         val gripColor = if (isResizing) {
                             MaterialTheme.colorScheme.primary
                         } else {
@@ -842,7 +908,6 @@ fun KannadaKeyboardPane(
                                             change.consume()
                                             val dxDp = with(density) { dragAmount.x.toDp().value }
                                             val dyDp = with(density) { dragAmount.y.toDp().value }
-                                            // Left-anchored on tablet -> 1:1 dx tracking; centered on phone -> 2x dx
                                             val widthDelta = if (isTabletSideMode) dxDp else dxDp * 2f
                                             customWidthDp = (customWidthDp + widthDelta).coerceIn(
                                                 minAllowedWidth.value,
@@ -905,18 +970,34 @@ fun KannadaKeyboardPane(
                     }
                 }
 
-                // Long-Press Kagunita & Special Conjunct Variation Popup
+                // =============================================================
+                // COMPLETE PER-LETTER LONG-PRESS POPUP
+                // Tab 1: ಕಾಗುಣಿತ (all 17 vowel forms for base or any chosen cluster)
+                // Tab 2: ಒತ್ತಕ್ಷರ (special + doubled + arkavattu + nasal + ALL 34 X+್+C!)
+                // =============================================================
                 variantPopup?.let { popup ->
+                    val isConsonant = remember(popup.rootKey) {
+                        KannadaVarnamalaData.isConsonantKey(popup.rootKey)
+                    }
+                    val quickStems = remember(popup.rootKey, popup.selectedStem) {
+                        KannadaVarnamalaData.quickStemsForLetter(popup.rootKey, popup.selectedStem)
+                    }
                     val variants = remember(popup.selectedStem) {
                         KannadaVarnamalaData.variantsForStem(popup.selectedStem)
+                    }
+                    val featuredClusters = remember(popup.rootKey) {
+                        KannadaVarnamalaData.featuredClustersForLetter(popup.rootKey)
+                    }
+                    val all34Conjuncts = remember(popup.rootKey) {
+                        KannadaVarnamalaData.all34ConjunctsForLetter(popup.rootKey)
                     }
 
                     Box(
                         modifier = Modifier
                             .matchParentSize()
-                            .background(Color.Black.copy(alpha = 0.45f))
+                            .background(Color.Black.copy(alpha = 0.50f))
                             .clickable { variantPopup = null }
-                            .padding(8.dp),
+                            .padding(6.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Surface(
@@ -926,27 +1007,59 @@ fun KannadaKeyboardPane(
                             shadowElevation = 8.dp,
                             border = BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary),
                             modifier = Modifier
-                                .fillMaxWidth()
+                                .fillMaxSize()
                                 .clickable(enabled = false) {}
                         ) {
                             Column(
                                 modifier = Modifier
-                                    .padding(10.dp)
-                                    .verticalScroll(rememberScrollState()),
-                                verticalArrangement = Arrangement.spacedBy(7.dp)
+                                    .fillMaxSize()
+                                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                                verticalArrangement = Arrangement.spacedBy(5.dp)
                             ) {
+                                // Popup Header: Title + Segmented Tabs (ಕಾಗುಣಿತ / ಒತ್ತಕ್ಷರ) + Close
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                    Text(
-                                        text = if (knOnly) "${popup.selectedStem} — ಕಾಗುಣಿತ ಆಯ್ಕೆಮಾಡಿ"
-                                        else "${popup.selectedStem} — Select Variant (ಕಾಗುಣಿತ)",
-                                        style = MaterialTheme.typography.titleSmall,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Text(
+                                            text = popup.selectedStem,
+                                            fontSize = 18.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                        if (isConsonant) {
+                                            FilterChip(
+                                                selected = popup.activePopupTab == PopupSectionTab.KAGUNITA,
+                                                onClick = {
+                                                    variantPopup = popup.copy(activePopupTab = PopupSectionTab.KAGUNITA)
+                                                },
+                                                label = {
+                                                    Text("ಕಾಗುಣಿತ", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                                }
+                                            )
+                                            FilterChip(
+                                                selected = popup.activePopupTab == PopupSectionTab.OTTAKSHARA,
+                                                onClick = {
+                                                    variantPopup = popup.copy(activePopupTab = PopupSectionTab.OTTAKSHARA)
+                                                },
+                                                label = {
+                                                    Text(
+                                                        text = if (knOnly) "ಒತ್ತಕ್ಷರ (${all34Conjuncts.size}+)"
+                                                        else "ಒತ್ತಕ್ಷರ / All (${all34Conjuncts.size}+)",
+                                                        fontSize = 11.5.sp,
+                                                        fontWeight = FontWeight.SemiBold
+                                                    )
+                                                }
+                                            )
+                                        }
+                                    }
+
                                     IconButton(
                                         onClick = { variantPopup = null },
                                         modifier = Modifier.size(28.dp)
@@ -955,61 +1068,133 @@ fun KannadaKeyboardPane(
                                     }
                                 }
 
-                                if (popup.relatedStems.size > 1) {
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .horizontalScroll(rememberScrollState()),
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        popup.relatedStems.forEach { stem ->
-                                            FilterChip(
-                                                selected = popup.selectedStem == stem,
-                                                onClick = { variantPopup = popup.copy(selectedStem = stem) },
-                                                label = {
-                                                    Text(
-                                                        text = stem,
-                                                        fontSize = 15.sp,
-                                                        fontWeight = FontWeight.SemiBold
-                                                    )
-                                                }
-                                            )
-                                        }
-                                    }
-                                }
-
-                                val perRow = if (variants.size <= 6) variants.size.coerceAtLeast(4) else 6
-                                variants.chunked(perRow).forEach { rowVars ->
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
-                                    ) {
-                                        rowVars.forEach { variant ->
-                                            Surface(
-                                                onClick = {
-                                                    variantPopup = null
-                                                    onInsertText(variant, false)
-                                                },
-                                                shape = RoundedCornerShape(8.dp),
-                                                color = MaterialTheme.colorScheme.primaryContainer,
-                                                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                // Scrollable Popup Content
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .weight(1f)
+                                        .verticalScroll(rememberScrollState()),
+                                    verticalArrangement = Arrangement.spacedBy(5.dp)
+                                ) {
+                                    if (!isConsonant || popup.activePopupTab == PopupSectionTab.KAGUNITA) {
+                                        // Quick stem chips (base + doubled + special + arkavattu + nasal)
+                                        if (isConsonant && quickStems.size > 1) {
+                                            Row(
                                                 modifier = Modifier
-                                                    .weight(1f)
-                                                    .height(38.dp)
+                                                    .fillMaxWidth()
+                                                    .horizontalScroll(rememberScrollState()),
+                                                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                                verticalAlignment = Alignment.CenterVertically
                                             ) {
-                                                Box(contentAlignment = Alignment.Center) {
-                                                    Text(
-                                                        text = variant,
-                                                        fontSize = if (variant.length >= 4) 15.sp else 17.sp,
-                                                        fontWeight = FontWeight.Medium,
-                                                        textAlign = TextAlign.Center,
-                                                        maxLines = 1
+                                                quickStems.forEach { stem ->
+                                                    FilterChip(
+                                                        selected = popup.selectedStem == stem,
+                                                        onClick = { variantPopup = popup.copy(selectedStem = stem) },
+                                                        label = {
+                                                            Text(
+                                                                text = stem,
+                                                                fontSize = 14.sp,
+                                                                fontWeight = FontWeight.SemiBold
+                                                            )
+                                                        }
                                                     )
                                                 }
                                             }
                                         }
-                                        repeat(perRow - rowVars.size) { Spacer(Modifier.weight(1f)) }
+
+                                        val perRow = if (variants.size <= 6) variants.size.coerceAtLeast(4) else 6
+                                        variants.chunked(perRow).forEach { rowVars ->
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                            ) {
+                                                rowVars.forEach { variant ->
+                                                    Surface(
+                                                        onClick = {
+                                                            variantPopup = null
+                                                            onInsertText(variant, false)
+                                                        },
+                                                        shape = RoundedCornerShape(8.dp),
+                                                        color = MaterialTheme.colorScheme.primaryContainer,
+                                                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                                        modifier = Modifier
+                                                            .weight(1f)
+                                                            .height(38.dp)
+                                                    ) {
+                                                        Box(contentAlignment = Alignment.Center) {
+                                                            Text(
+                                                                text = variant,
+                                                                fontSize = if (variant.length >= 4) 14.sp else 16.sp,
+                                                                fontWeight = FontWeight.Medium,
+                                                                textAlign = TextAlign.Center,
+                                                                maxLines = 1
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                                repeat(perRow - rowVars.size) { Spacer(Modifier.weight(1f)) }
+                                            }
+                                        }
+                                    } else {
+                                        // TAB 2: ALL Ottakshara Combinations for popup.rootKey
+                                        Text(
+                                            text = if (knOnly) "ಸೇರಿಸಲು ಒತ್ತಿರಿ • ಕಾಗುಣಿತ ನೋಡಲು ಒತ್ತಿ ಹಿಡಿಯಿರಿ"
+                                            else "Tap to insert • Hold any cluster for all 17 ಕಾಗುಣಿತ forms",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.padding(horizontal = 2.dp)
+                                        )
+
+                                        SectionMiniLabel(
+                                            if (knOnly) "ವಿಶೇಷ, ದ್ವಿತ್ವ, ಅರ್ಕಾವತ್ತು ಮತ್ತು ಅನುಸ್ವಾರ"
+                                            else "Special, Doubled, Arkavattu & Nasal"
+                                        )
+                                        featuredClusters.chunked(6).forEach { chunk ->
+                                            KeyRow(
+                                                keys = chunk,
+                                                columns = 6,
+                                                isVowelRow = true,
+                                                showVariantDot = true,
+                                                onTap = { chosen ->
+                                                    variantPopup = null
+                                                    onInsertText(chosen, false)
+                                                },
+                                                onLongPress = { chosen ->
+                                                    variantPopup = popup.copy(
+                                                        selectedStem = chosen,
+                                                        activePopupTab = PopupSectionTab.KAGUNITA
+                                                    )
+                                                }
+                                            )
+                                        }
+
+                                        HorizontalDivider(
+                                            modifier = Modifier.padding(vertical = 2.dp),
+                                            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
+                                        )
+
+                                        SectionMiniLabel(
+                                            if (knOnly) "${popup.rootKey} + ಎಲ್ಲಾ 34 ವ್ಯಂಜನ ಒತ್ತಕ್ಷರಗಳು"
+                                            else "All 34 ${popup.rootKey} + Consonant Combinations"
+                                        )
+                                        all34Conjuncts.chunked(6).forEach { chunk ->
+                                            KeyRow(
+                                                keys = chunk,
+                                                columns = 6,
+                                                isVowelRow = false,
+                                                showVariantDot = true,
+                                                onTap = { chosen ->
+                                                    variantPopup = null
+                                                    onInsertText(chosen, false)
+                                                },
+                                                onLongPress = { chosen ->
+                                                    variantPopup = popup.copy(
+                                                        selectedStem = chosen,
+                                                        activePopupTab = PopupSectionTab.KAGUNITA
+                                                    )
+                                                }
+                                            )
+                                        }
                                     }
                                 }
                             }
