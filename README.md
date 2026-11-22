@@ -1,6 +1,7 @@
 # Kadata (ಕಡತ) — Offline Kannada Document Reader, Editor & Converter
 
-[![Version](https://img.shields.io/badge/Version-0.17.0-1A4D7A?style=flat)](VERSION)
+[![Download APK](https://img.shields.io/badge/Download-Kadata%20APK-007ACC?style=flat&logo=android&logoColor=white)](https://github.com/AdarshK95/Kadata/releases/latest)
+[![Version](https://img.shields.io/badge/Version-0.17.2-1A4D7A?style=flat)](VERSION)
 [![Android](https://img.shields.io/badge/Platform-Android%208.0%2B%20(API%2028%2B)-3DDC84?style=flat&logo=android&logoColor=white)](https://developer.android.com)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.1-7F52FF?style=flat&logo=kotlin&logoColor=white)](https://kotlinlang.org)
 [![Compose](https://img.shields.io/badge/Jetpack%20Compose-Material%203-4285F4?style=flat&logo=jetpackcompose&logoColor=white)](https://developer.android.com/jetpack/compose)
