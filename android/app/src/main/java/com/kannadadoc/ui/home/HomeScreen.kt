@@ -7,6 +7,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -36,6 +37,7 @@ import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Settings
@@ -97,6 +99,7 @@ import com.kannadadoc.data.local.UserSettings
 import com.kannadadoc.data.storage.FileLocationHelper
 import com.kannadadoc.data.storage.FileLocationResult
 import com.kannadadoc.parser.DocumentRouter
+import com.kannadadoc.ui.common.AboutKadataDialog
 import com.kannadadoc.ui.common.FileTypeIcon
 import com.kannadadoc.ui.common.TwoStepFormatExportDialog
 import com.kannadadoc.ui.editor.ExportAction
@@ -150,6 +153,7 @@ fun HomeScreen(
     var showNewDocDialog by remember { mutableStateOf(false) }
     var newDocTitle by remember { mutableStateOf("") }
     var showSettingsDialog by remember { mutableStateOf(false) }
+    var showAboutDialog by remember { mutableStateOf(false) }
 
     var filePendingDelete by remember { mutableStateOf<RecentFileEntity?>(null) }
     var filePendingRename by remember { mutableStateOf<RecentFileEntity?>(null) }
@@ -190,8 +194,9 @@ fun HomeScreen(
     val isLandscape = configuration.screenWidthDp > configuration.screenHeightDp
     val isTabletSplitHome = configuration.screenWidthDp >= 600 && isLandscape
     val blurredBgRes = if (isLandscape) R.drawable.kadata_bg_tablet_blur else R.drawable.kadata_bg_mobile_blur
-    val bgScrimColor = if (userSettings.isDarkTheme) {
-        Color(0xA80F161E)
+    val isDarkTheme = userSettings.resolveDarkTheme(isSystemInDarkTheme())
+    val bgScrimColor = if (isDarkTheme) {
+        Color(0xD6000000) // Pure black scrim in OLED dark mode (zero blue tint)
     } else {
         Color(0x88FAF3E3)
     }
@@ -465,7 +470,7 @@ fun HomeScreen(
                                         kannadaFormatTag = resolveDisplayFormatTag(file, documentFormatMap),
                                         isWideTable = isWideTable,
                                         knOnly = knOnly,
-                                        isDarkTheme = userSettings.isDarkTheme,
+                                        isDarkTheme = isDarkTheme,
                                         onClick = { onRecentFileClick(file) },
                                         onOpenLocationClick = {
                                             when (val res = FileLocationHelper.openFileLocation(context, file)) {
@@ -509,7 +514,7 @@ fun HomeScreen(
                                 kannadaFormatTag = resolveDisplayFormatTag(file, documentFormatMap),
                                 isDetailsMode = false,
                                 knOnly = knOnly,
-                                isDarkTheme = userSettings.isDarkTheme,
+                                isDarkTheme = isDarkTheme,
                                 onClick = { onRecentFileClick(file) },
                                 onOpenLocationClick = {
                                     when (val res = FileLocationHelper.openFileLocation(context, file)) {
@@ -732,11 +737,61 @@ fun HomeScreen(
                     modifier = Modifier.verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
+                    Surface(
+                        onClick = {
+                            showSettingsDialog = false
+                            showAboutDialog = true
+                        },
+                        shape = MaterialTheme.shapes.medium,
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Info,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(22.dp)
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = if (knOnly) "ಆಪ್ ಬಗ್ಗೆ (ಕಡತ)" else "About App • ಆಪ್ ಬಗ್ಗೆ",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                                Text(
+                                    text = if (knOnly) "ಡೆವಲಪರ್: Adarsh Katagihallimath" else "Developer: Adarsh Katagihallimath",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
+                                )
+                            }
+                        }
+                    }
+
+                    HorizontalDivider()
+
                     Text(
-                        text = if (knOnly) "ಥೀಮ್ (ಬೆಳಕು / ಕತ್ತಲೆ)" else "Theme • ಥೀಮ್",
+                        text = if (knOnly) "ಥೀಮ್ (ಸಿಸ್ಟಮ್ / ಬೆಳಕು / ಕತ್ತಲೆ)" else "Theme • ಥೀಮ್",
                         style = MaterialTheme.typography.titleMedium
                     )
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        FilterChip(
+                            selected = userSettings.themeMode == AppThemeMode.SYSTEM,
+                            onClick = { onThemeModeChange(AppThemeMode.SYSTEM) },
+                            label = { Text(if (knOnly) "ಸಿಸ್ಟಮ್" else "System") }
+                        )
                         FilterChip(
                             selected = userSettings.themeMode == AppThemeMode.LIGHT,
                             onClick = { onThemeModeChange(AppThemeMode.LIGHT) },
@@ -759,26 +814,40 @@ fun HomeScreen(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable { onSaveFormatChange(format) },
-                            verticalAlignment = Alignment.CenterVertically
+                                .clickable { onSaveFormatChange(format) }
+                                .padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.Top
                         ) {
                             RadioButton(
                                 selected = userSettings.defaultSaveFormat == format,
                                 onClick = { onSaveFormatChange(format) }
                             )
-                            Spacer(Modifier.width(6.dp))
+                            Spacer(Modifier.width(4.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = if (knOnly) format.displayNameKn else format.displayName,
+                                    text = format.bilingualTitle,
                                     style = MaterialTheme.typography.bodyLarge
                                 )
                                 Text(
-                                    text = if (knOnly) format.subtitleKn else format.subtitle,
+                                    text = format.bilingualSubtitle,
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
                         }
+                    }
+
+                    Surface(
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+                        shape = MaterialTheme.shapes.small,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = DefaultSaveFormat.KADATA_ALL_FORMATS_NOTE_BILINGUAL,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.padding(10.dp)
+                        )
                     }
 
                     HorizontalDivider()
@@ -863,6 +932,7 @@ fun HomeScreen(
                     ) {
                         Text(if (knOnly) "ಡೀಫಾಲ್ಟ್ ಆಪ್ ಆಗಿ ಹೊಂದಿಸಿ" else "Set as Default App")
                     }
+
                     Text(
                         text = if (knOnly) {
                             "ಸೂಚನೆ: ವಾಟ್ಸಾಪ್‌ನಲ್ಲಿ ಫೈಲ್ ಒತ್ತಿದಾಗ Kadata → Always ಆಯ್ಕೆ ಮಾಡಿ."
@@ -879,6 +949,13 @@ fun HomeScreen(
                     Text(if (knOnly) "ಮುಗಿಯಿತು" else "Done")
                 }
             }
+        )
+    }
+
+    if (showAboutDialog) {
+        AboutKadataDialog(
+            knOnly = knOnly,
+            onDismiss = { showAboutDialog = false }
         )
     }
 }
@@ -960,20 +1037,20 @@ private fun resolveDisplayFormatTag(
     return when {
         name.contains("_Nudi", ignoreCase = true) -> "Nudi"
         name.contains("_Baraha", ignoreCase = true) -> "Baraha"
-        name.contains("_Unicode", ignoreCase = true) -> "Modern"
+        name.contains("_Unicode", ignoreCase = true) || name.contains("_Universal", ignoreCase = true) -> "Universal"
         entity.converterOverride.equals("nudi", ignoreCase = true) -> "Nudi"
         entity.converterOverride.equals("baraha", ignoreCase = true) -> "Baraha"
-        else -> "Modern"
+        else -> "Universal"
     }
 }
 
 private fun localizeFormatTag(rawTag: String, knOnly: Boolean): String =
     when (rawTag) {
-        "Nudi" -> if (knOnly) "ನುಡಿ" else "Nudi"
-        "Baraha" -> if (knOnly) "ಬರಹ" else "Baraha"
-        "Modern" -> if (knOnly) "ಆಧುನಿಕ" else "Modern"
-        "English" -> if (knOnly) "ಇಂಗ್ಲಿಷ್" else "English"
-        "Scanned" -> if (knOnly) "ಸ್ಕ್ಯಾನ್" else "Scanned"
+        "Nudi" -> "Nudi • ನುಡಿ"
+        "Baraha" -> "Baraha • ಬರಹ"
+        "Modern", "Universal" -> "Universal • ಸಾರ್ವತ್ರಿಕ"
+        "English" -> "English • ಇಂಗ್ಲಿಷ್"
+        "Scanned" -> "Scanned • ಸ್ಕ್ಯಾನ್"
         else -> rawTag
     }
 
@@ -1010,7 +1087,7 @@ private fun DetailsListColumnHeader(knOnly: Boolean) {
                 text = if (knOnly) "ಫಾರ್ಮ್ಯಾಟ್" else "Format",
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.width(64.dp)
+                modifier = Modifier.width(126.dp)
             )
             Text(
                 text = if (knOnly) "ಗಾತ್ರ" else "Size",
@@ -1108,7 +1185,7 @@ private fun RecentFileDetailsRow(
                     color = MaterialTheme.colorScheme.primary,
                     maxLines = 1,
                     softWrap = false,
-                    modifier = Modifier.width(64.dp)
+                    modifier = Modifier.width(126.dp)
                 )
                 Text(
                     text = sizeLabel,

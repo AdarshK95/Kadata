@@ -158,7 +158,7 @@ class HomeViewModel(
         when {
             name.contains("_Nudi", ignoreCase = true) -> return "Nudi"
             name.contains("_Baraha", ignoreCase = true) -> return "Baraha"
-            name.contains("_Unicode", ignoreCase = true) -> return "Modern"
+            name.contains("_Unicode", ignoreCase = true) || name.contains("_Universal", ignoreCase = true) -> return "Universal"
         }
 
         val inspectUri = Uri.parse(item.savedUnicodeUri ?: item.uriString)
@@ -166,7 +166,7 @@ class HomeViewModel(
             .getOrNull()
 
         if (parsed == null) {
-            return if (item.detectedFormat == DocFormat.PDF) "Scanned" else "Modern"
+            return if (item.detectedFormat == DocFormat.PDF) "Scanned" else "Universal"
         }
 
         val allRuns = mutableListOf<TextRun>()
@@ -203,7 +203,7 @@ class HomeViewModel(
             nonBlankRuns == 0 && item.detectedFormat == DocFormat.PDF -> "Scanned"
             hasBaraha -> "Baraha"
             hasNudi -> "Nudi"
-            hasUnicode -> "Modern"
+            hasUnicode -> "Universal"
             hasEnglish -> "English"
             item.detectedFormat == DocFormat.PDF -> "Scanned"
             else -> preferences.settings.value.defaultSaveFormat.shortLabel
@@ -365,7 +365,7 @@ class HomeViewModel(
                     )
                     preferences.setDocumentFormatTag(
                         registered.uriString,
-                        if (fileType == TargetFileType.PDF) "Modern" else encoding.shortBadge
+                        if (fileType == TargetFileType.PDF) "Universal" else encoding.shortBadge
                     )
                     _uiState.value = _uiState.value.copy(isLoading = false)
                     ShareHelper.shareFile(
@@ -430,7 +430,7 @@ class HomeViewModel(
                 )
                 preferences.setDocumentFormatTag(
                     registered.uriString,
-                    if (fileType == TargetFileType.PDF) "Modern" else encoding.shortBadge
+                    if (fileType == TargetFileType.PDF) "Universal" else encoding.shortBadge
                 )
             }.onSuccess {
                 _uiState.value = _uiState.value.copy(

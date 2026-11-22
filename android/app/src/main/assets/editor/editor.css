@@ -168,30 +168,31 @@ mark.kd-search-match.kd-search-active {
   border-radius: 3px;
 }
 
-/* Dark theme matching Kadata deep slate navy + heritage gold */
+/* True Pure Black (OLED) Dark Theme — zero bluish-grey */
 body.dark-theme {
-  background-color: #101720;
-  color: #eae5d9;
+  background-color: #000000;
+  color: #f2f2f2;
 }
 
 body.dark-theme #desk {
-  background-color: #101720;
+  background-color: #000000;
 }
 
 body.dark-theme #paper {
-  background-color: #18222e;
-  color: #ece8de;
-  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.45);
-  caret-color: #8abce6;
+  background-color: #0a0a0a;
+  color: #f2f2f2;
+  border: 1px solid #1e1e1e;
+  box-shadow: none;
+  caret-color: #ffd166;
 }
 
 body.dark-theme #paper.read-only-original {
-  background-color: #212018;
-  border-color: #9e7b36;
+  background-color: #12100a;
+  border-color: #7c622c;
 }
 
 body.dark-theme #paper:empty::before {
-  color: #7c8996;
+  color: #7a7a7a;
 }
 
 body.dark-theme #paper h1 {
@@ -204,23 +205,23 @@ body.dark-theme #paper h2 {
 
 body.dark-theme #paper td,
 body.dark-theme #paper th {
-  border-color: #394a5c;
+  border-color: #303030;
 }
 
 body.dark-theme #paper tr:first-child td,
 body.dark-theme #paper th {
-  background-color: #202d3b;
+  background-color: #141414;
 }
 
 body.dark-theme #original-banner {
-  background: #332914;
+  background: #1c1608;
   color: #f7dfaa;
-  border-color: #7c5e23;
+  border-color: #6b521d;
 }
 
 body.dark-theme mark.kd-search-match {
   background-color: #e0b86a;
-  color: #101720;
+  color: #000000;
 }
 
 body.dark-theme mark.kd-search-match.kd-search-active {
@@ -247,6 +248,7 @@ body.dark-theme mark.kd-search-match.kd-search-active {
     color: #000000 !important;
     padding: 0 !important;
     margin: 0 !important;
+    border: none !important;
   }
   #original-banner {
     display: none !important;
@@ -285,4 +287,64 @@ body.tablet-kb-open #desk {
 body.tablet-kb-open #paper {
   max-width: 100% !important;
   padding: 20px 26px 2400px 26px !important;
+}
+
+/* Guaranteed-visible fixed-viewport blinking cursor while in-app Varnamala keyboard is open */
+#kd-virtual-caret {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 3px;
+  height: 28px;
+  background-color: #0d5ca8;
+  border-radius: 2px;
+  pointer-events: none;
+  z-index: 2147483647;
+  display: none;
+  box-shadow: 0 0 6px rgba(13, 92, 168, 0.55);
+  animation: kd-caret-blink 1.05s steps(1, end) infinite;
+}
+
+body.dark-theme #kd-virtual-caret {
+  background-color: #ffd166;
+  box-shadow: 0 0 7px rgba(255, 209, 102, 0.65);
+}
+
+#kd-virtual-caret.visible {
+  display: block;
+}
+
+#kd-virtual-caret.solid {
+  animation: none !important;
+  opacity: 1 !important;
+}
+
+@keyframes kd-caret-blink {
+  0%, 58% { opacity: 1; }
+  59%, 100% { opacity: 0.15; }
+}
+
+@media print {
+  #kd-virtual-caret {
+    display: none !important;
+  }
+}
+
+/* Brief subtle highlight pulse when Undo / Redo scrolls to the modified section */
+@keyframes kd-history-flash-light {
+  0% { background-color: rgba(26, 77, 122, 0.20); border-radius: 4px; }
+  100% { background-color: transparent; }
+}
+
+@keyframes kd-history-flash-dark {
+  0% { background-color: rgba(255, 209, 102, 0.22); border-radius: 4px; }
+  100% { background-color: transparent; }
+}
+
+.kd-history-flash {
+  animation: kd-history-flash-light 0.85s ease-out;
+}
+
+body.dark-theme .kd-history-flash {
+  animation: kd-history-flash-dark 0.85s ease-out;
 }

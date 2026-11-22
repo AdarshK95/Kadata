@@ -4,10 +4,30 @@ import com.kannadadoc.parser.DocBlock
 import com.kannadadoc.parser.ParsedDocument
 import com.kannadadoc.parser.TextRun
 
-enum class KannadaFormat(val labelEn: String, val labelKn: String) {
-    UNICODE("Unicode Kannada", "ಯೂನಿಕೋಡ್ ಕನ್ನಡ"),
-    NUDI("Nudi", "ನುಡಿ"),
-    BARAHA("Baraha", "ಬರಹ")
+enum class KannadaFormat(
+    val labelEn: String,
+    val labelKn: String,
+    val bilingualTitle: String,
+    val bilingualSubtitle: String
+) {
+    UNICODE(
+        labelEn = "Modern Universal Kannada",
+        labelKn = "ಆಧುನಿಕ ಸಾರ್ವತ್ರಿಕ ಕನ್ನಡ",
+        bilingualTitle = "Modern Universal Kannada • ಆಧುನಿಕ ಸಾರ್ವತ್ರಿಕ ಕನ್ನಡ",
+        bilingualSubtitle = "Supported on all modern devices (phones, tablets, etc.), not supported in Nudi & Baraha • ಫೋನ್, ಟ್ಯಾಬ್ಲೆಟ್ ಮುಂತಾದ ಎಲ್ಲಾ ಆಧುನಿಕ ಸಾಧನಗಳಲ್ಲಿ ಬೆಂಬಲಿತವಾಗಿದೆ, ಆದರೆ ನುಡಿ ಮತ್ತು ಬರಹದಲ್ಲಿ ಬೆಂಬಲಿತವಾಗಿಲ್ಲ"
+    ),
+    NUDI(
+        labelEn = "Nudi",
+        labelKn = "ನುಡಿ",
+        bilingualTitle = "Nudi • ನುಡಿ",
+        bilingualSubtitle = "Supported on PC only • ಕಂಪ್ಯೂಟರ್‌ನಲ್ಲಿ (PC) ಮಾತ್ರ ಬೆಂಬಲಿತವಾಗಿದೆ"
+    ),
+    BARAHA(
+        labelEn = "Baraha",
+        labelKn = "ಬರಹ",
+        bilingualTitle = "Baraha • ಬರಹ",
+        bilingualSubtitle = "Supported on PC only • ಕಂಪ್ಯೂಟರ್‌ನಲ್ಲಿ (PC) ಮಾತ್ರ ಬೆಂಬಲಿತವಾಗಿದೆ"
+    )
 }
 
 data class DetectedInputInfo(
@@ -173,13 +193,13 @@ object KannadaTextConverter {
         return when {
             unicodeCount > 0 && unicodeCount >= legacyCount -> DetectedInputInfo(
                 detectedFormat = KannadaFormat.UNICODE,
-                confidenceNoteEn = "Unicode Kannada",
-                confidenceNoteKn = "ಯೂನಿಕೋಡ್ ಕನ್ನಡ"
+                confidenceNoteEn = "Modern Universal Kannada",
+                confidenceNoteKn = "ಆಧುನಿಕ ಸಾರ್ವತ್ರಿಕ ಕನ್ನಡ"
             )
             legacyCount > 0 -> DetectedInputInfo(
                 detectedFormat = KannadaFormat.NUDI,
-                confidenceNoteEn = "Nudi / Baraha (ASCII)",
-                confidenceNoteKn = "ನುಡಿ / ಬರಹ (ASCII)"
+                confidenceNoteEn = "Nudi / Baraha (PC)",
+                confidenceNoteKn = "ನುಡಿ / ಬರಹ (PC)"
             )
             else -> DetectedInputInfo(
                 detectedFormat = KannadaFormat.UNICODE,

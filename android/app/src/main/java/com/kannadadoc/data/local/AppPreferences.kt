@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 enum class AppThemeMode {
+    SYSTEM,
     LIGHT,
     DARK
 }
@@ -26,48 +27,67 @@ enum class HomeViewMode {
 enum class DefaultSaveFormat(
     val displayName: String,
     val displayNameKn: String,
+    val bilingualTitle: String,
     val subtitle: String,
     val subtitleKn: String,
+    val bilingualSubtitle: String,
     val shortLabel: String,
     val jsExportMode: String
 ) {
     NUDI_PC(
-        displayName = "Nudi for PC (.docx)",
-        displayNameKn = "ನುಡಿ (PC .docx)",
-        subtitle = "Best for colleagues using Nudi on Windows (English stays Calibri)",
-        subtitleKn = "ಕಂಪ್ಯೂಟರ್‌ನಲ್ಲಿ ನುಡಿ ಬಳಸುವವರಿಗೆ ಸೂಕ್ತ",
+        displayName = "Nudi",
+        displayNameKn = "ನುಡಿ",
+        bilingualTitle = "Nudi • ನುಡಿ",
+        subtitle = "Supported on PC only",
+        subtitleKn = "ಕಂಪ್ಯೂಟರ್‌ನಲ್ಲಿ (PC) ಮಾತ್ರ ಬೆಂಬಲಿತವಾಗಿದೆ",
+        bilingualSubtitle = "Supported on PC only • ಕಂಪ್ಯೂಟರ್‌ನಲ್ಲಿ (PC) ಮಾತ್ರ ಬೆಂಬಲಿತವಾಗಿದೆ",
         shortLabel = "Nudi",
         jsExportMode = "save_default_nudi"
     ),
     BARAHA_PC(
-        displayName = "Baraha for PC (.docx)",
-        displayNameKn = "ಬರಹ (PC .docx)",
-        subtitle = "Best for colleagues using Baraha / BRH Kannada on Windows",
-        subtitleKn = "ಕಂಪ್ಯೂಟರ್‌ನಲ್ಲಿ ಬರಹ ಬಳಸುವವರಿಗೆ ಸೂಕ್ತ",
+        displayName = "Baraha",
+        displayNameKn = "ಬರಹ",
+        bilingualTitle = "Baraha • ಬರಹ",
+        subtitle = "Supported on PC only",
+        subtitleKn = "ಕಂಪ್ಯೂಟರ್‌ನಲ್ಲಿ (PC) ಮಾತ್ರ ಬೆಂಬಲಿತವಾಗಿದೆ",
+        bilingualSubtitle = "Supported on PC only • ಕಂಪ್ಯೂಟರ್‌ನಲ್ಲಿ (PC) ಮಾತ್ರ ಬೆಂಬಲಿತವಾಗಿದೆ",
         shortLabel = "Baraha",
         jsExportMode = "save_default_baraha"
     ),
     UNICODE(
-        displayName = "Modern Unicode (.docx)",
-        displayNameKn = "ಆಧುನಿಕ ಯೂನಿಕೋಡ್ (.docx)",
-        subtitle = "Standard Unicode Kannada (Google Docs, phones, newer Word)",
-        subtitleKn = "ಗೂಗಲ್ ಡಾಕ್ಸ್, ಮೊಬೈಲ್ ಮತ್ತು ಹೊಸ ವರ್ಡ್‌ಗೆ ಸೂಕ್ತ",
-        shortLabel = "Modern",
+        displayName = "Modern Universal Kannada",
+        displayNameKn = "ಆಧುನಿಕ ಸಾರ್ವತ್ರಿಕ ಕನ್ನಡ",
+        bilingualTitle = "Modern Universal Kannada • ಆಧುನಿಕ ಸಾರ್ವತ್ರಿಕ ಕನ್ನಡ",
+        subtitle = "Supported on all modern devices (phones, tablets, etc.), not supported in Nudi & Baraha",
+        subtitleKn = "ಫೋನ್, ಟ್ಯಾಬ್ಲೆಟ್ ಮುಂತಾದ ಎಲ್ಲಾ ಆಧುನಿಕ ಸಾಧನಗಳಲ್ಲಿ ಬೆಂಬಲಿತವಾಗಿದೆ, ಆದರೆ ನುಡಿ ಮತ್ತು ಬರಹದಲ್ಲಿ ಬೆಂಬಲಿತವಾಗಿಲ್ಲ",
+        bilingualSubtitle = "Supported on all modern devices (phones, tablets, etc.), not supported in Nudi & Baraha • ಫೋನ್, ಟ್ಯಾಬ್ಲೆಟ್ ಮುಂತಾದ ಎಲ್ಲಾ ಆಧುನಿಕ ಸಾಧನಗಳಲ್ಲಿ ಬೆಂಬಲಿತವಾಗಿದೆ, ಆದರೆ ನುಡಿ ಮತ್ತು ಬರಹದಲ್ಲಿ ಬೆಂಬಲಿತವಾಗಿಲ್ಲ",
+        shortLabel = "Universal",
         jsExportMode = "save_default_unicode"
-    )
+    );
+
+    companion object {
+        const val KADATA_ALL_FORMATS_NOTE_BILINGUAL =
+            "All of these formats are supported in Kadata — bring in a document from any format and Kadata automatically detects and displays it seamlessly.\n" +
+                "ಈ ಎಲ್ಲಾ ಫಾರ್ಮ್ಯಾಟ್‌ಗಳು ಕಡತ ಆಪ್‌ನಲ್ಲಿ ಬೆಂಬಲಿತವಾಗಿವೆ — ಯಾವುದೇ ಫಾರ್ಮ್ಯಾಟ್‌ನ ದಾಖಲೆಯನ್ನು ತಂದರೂ ಕಡತ ಸ್ವಯಂಚಾಲಿತವಾಗಿ ಗುರುತಿಸಿ ಸುಗಮವಾಗಿ ತೋರಿಸುತ್ತದೆ."
+    }
 }
 
 data class UserSettings(
-    val themeMode: AppThemeMode = AppThemeMode.LIGHT,
+    val themeMode: AppThemeMode = AppThemeMode.SYSTEM,
     val appLanguage: AppLanguage = AppLanguage.ENGLISH,
     val defaultFontSizePt: Int = 18,
     val defaultSaveFormat: DefaultSaveFormat = DefaultSaveFormat.NUDI_PC,
-    val autoSaveIntervalMinutes: Int = 10,
+    val autoSaveIntervalMinutes: Int = 5,
     val blockAutoKeyboard: Boolean = false,
     val homeViewMode: HomeViewMode = HomeViewMode.GRID
 ) {
-    val isDarkTheme: Boolean get() = themeMode == AppThemeMode.DARK
     val isKannadaUi: Boolean get() = appLanguage == AppLanguage.KANNADA
+
+    fun resolveDarkTheme(isSystemInDarkTheme: Boolean): Boolean = when (themeMode) {
+        AppThemeMode.SYSTEM -> isSystemInDarkTheme
+        AppThemeMode.DARK -> true
+        AppThemeMode.LIGHT -> false
+    }
 }
 
 class AppPreferences(context: Context) {
@@ -81,9 +101,9 @@ class AppPreferences(context: Context) {
     val documentFormatMap: StateFlow<Map<String, String>> = _documentFormatMap.asStateFlow()
 
     private fun loadSettings(): UserSettings {
-        val themeName = prefs.getString(KEY_THEME_MODE, AppThemeMode.LIGHT.name)
+        val themeName = prefs.getString(KEY_THEME_MODE_V2, AppThemeMode.SYSTEM.name)
         val theme = runCatching { AppThemeMode.valueOf(themeName ?: "") }
-            .getOrDefault(AppThemeMode.LIGHT)
+            .getOrDefault(AppThemeMode.SYSTEM)
 
         val langName = prefs.getString(KEY_APP_LANGUAGE, AppLanguage.ENGLISH.name)
         val language = runCatching { AppLanguage.valueOf(langName ?: "") }
@@ -97,7 +117,7 @@ class AppPreferences(context: Context) {
         val viewMode = runCatching { HomeViewMode.valueOf(viewModeName ?: "") }
             .getOrDefault(HomeViewMode.GRID)
 
-        val autoSaveMin = prefs.getInt(KEY_AUTOSAVE_MINUTES, 10).coerceIn(1, 60)
+        val autoSaveMin = prefs.getInt(KEY_AUTOSAVE_MINUTES, 5).coerceIn(1, 60)
 
         return UserSettings(
             themeMode = theme,
@@ -137,7 +157,7 @@ class AppPreferences(context: Context) {
     }
 
     fun setThemeMode(mode: AppThemeMode) {
-        prefs.edit().putString(KEY_THEME_MODE, mode.name).apply()
+        prefs.edit().putString(KEY_THEME_MODE_V2, mode.name).apply()
         _settings.value = _settings.value.copy(themeMode = mode)
     }
 
@@ -200,11 +220,11 @@ class AppPreferences(context: Context) {
     }
 
     companion object {
-        private const val KEY_THEME_MODE = "theme_mode"
+        private const val KEY_THEME_MODE_V2 = "theme_mode_v2"
         private const val KEY_APP_LANGUAGE = "app_language"
         private const val KEY_FONT_SIZE = "default_font_size_pt"
         private const val KEY_SAVE_FORMAT = "default_save_format"
-        private const val KEY_AUTOSAVE_MINUTES = "autosave_interval_minutes"
+        private const val KEY_AUTOSAVE_MINUTES = "autosave_interval_minutes_v2"
         private const val KEY_LAST_SPLASH_DATE = "last_daily_splash_date"
         private const val KEY_BLOCK_AUTO_KB = "block_auto_keyboard"
         private const val KEY_HOME_VIEW_MODE = "home_view_mode"

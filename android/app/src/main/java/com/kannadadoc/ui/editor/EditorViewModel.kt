@@ -38,13 +38,42 @@ enum class KannadaEncodingChoice(
     val id: String,
     val labelEn: String,
     val labelKn: String,
+    val bilingualTitle: String,
+    val bilingualSubtitle: String,
     val suffix: String,
     val shortBadge: String,
     val defaultFontForWord: String
 ) {
-    NUDI("nudi", "Nudi", "ನುಡಿ", "Nudi", "Nudi", "Calibri"),
-    BARAHA("baraha", "Baraha", "ಬರಹ", "Baraha", "Baraha", "Calibri"),
-    UNICODE("unicode", "Modern Unicode", "ಆಧುನಿಕ ಯೂನಿಕೋಡ್", "Unicode", "Modern", "Noto Sans Kannada")
+    NUDI(
+        id = "nudi",
+        labelEn = "Nudi",
+        labelKn = "ನುಡಿ",
+        bilingualTitle = "Nudi • ನುಡಿ",
+        bilingualSubtitle = "Supported on PC only • ಕಂಪ್ಯೂಟರ್‌ನಲ್ಲಿ (PC) ಮಾತ್ರ ಬೆಂಬಲಿತವಾಗಿದೆ",
+        suffix = "Nudi",
+        shortBadge = "Nudi",
+        defaultFontForWord = "Calibri"
+    ),
+    BARAHA(
+        id = "baraha",
+        labelEn = "Baraha",
+        labelKn = "ಬರಹ",
+        bilingualTitle = "Baraha • ಬರಹ",
+        bilingualSubtitle = "Supported on PC only • ಕಂಪ್ಯೂಟರ್‌ನಲ್ಲಿ (PC) ಮಾತ್ರ ಬೆಂಬಲಿತವಾಗಿದೆ",
+        suffix = "Baraha",
+        shortBadge = "Baraha",
+        defaultFontForWord = "Calibri"
+    ),
+    UNICODE(
+        id = "unicode",
+        labelEn = "Modern Universal Kannada",
+        labelKn = "ಆಧುನಿಕ ಸಾರ್ವತ್ರಿಕ ಕನ್ನಡ",
+        bilingualTitle = "Modern Universal Kannada • ಆಧುನಿಕ ಸಾರ್ವತ್ರಿಕ ಕನ್ನಡ",
+        bilingualSubtitle = "Supported on all modern devices (phones, tablets, etc.), not supported in Nudi & Baraha • ಫೋನ್, ಟ್ಯಾಬ್ಲೆಟ್ ಮುಂತಾದ ಎಲ್ಲಾ ಆಧುನಿಕ ಸಾಧನಗಳಲ್ಲಿ ಬೆಂಬಲಿತವಾಗಿದೆ, ಆದರೆ ನುಡಿ ಮತ್ತು ಬರಹದಲ್ಲಿ ಬೆಂಬಲಿತವಾಗಿಲ್ಲ",
+        suffix = "Universal",
+        shortBadge = "Universal",
+        defaultFontForWord = "Noto Sans Kannada"
+    )
 }
 
 enum class TargetFileType(
@@ -62,9 +91,9 @@ enum class TargetFileType(
 data class DocumentInfo(
     val fileName: String = "",
     val fileFormat: DocFormat = DocFormat.DOCX,
-    val detectedEncodingLabel: String = "Modern Unicode",
+    val detectedEncodingLabel: String = "Modern Universal Kannada • ಆಧುನಿಕ ಸಾರ್ವತ್ರಿಕ ಕನ್ನಡ",
     val currentEncoding: KannadaEncodingChoice? = null,
-    val shortFormatTag: String = "Modern",
+    val shortFormatTag: String = "Universal",
     val fontFamiliesFound: List<String> = emptyList(),
     val hasLegacyKannada: Boolean = false,
     val hasUnicodeKannada: Boolean = false,
@@ -274,6 +303,36 @@ class EditorViewModel(
         }
     }
 
+    /**
+     * Renames the currently open document from inside the editor top bar,
+     * preserving the file extension if omitted, and syncing Recent Files + Drafts.
+     */
+    fun renameCurrentDocument(rawNewName: String) {
+        val trimmed = rawNewName.trim()
+        if (trimmed.isEmpty()) return
+        val state = _uiState.value
+        val currentTitle = state.documentTitle.ifBlank { "Untitled.docx" }
+        val existingExt = currentTitle.substringAfterLast('.', "")
+        val finalName = if (existingExt.isNotEmpty() && !trimmed.contains('.')) {
+            "$trimmed.$existingExt"
+        } else {
+            trimmed
+        }
+
+        _uiState.value = state.copy(
+            documentTitle = finalName,
+            documentInfo = state.documentInfo.copy(fileName = finalName),
+            statusMessage = "Renamed to $finalName"
+        )
+
+        if (state.uriString.isNotBlank()) {
+            viewModelScope.launch(Dispatchers.IO) {
+                recentFileDao.updateDisplayName(state.uriString, finalName)
+                draftDao.updateTitle(state.uriString, finalName)
+            }
+        }
+    }
+
     fun shareExistingFileAsIs() {
         val state = _uiState.value
         if (state.uriString.isBlank()) {
@@ -350,14 +409,14 @@ class EditorViewModel(
 
                     exportMode == "save_default_unicode" || exportMode == "save_internal" -> {
                         val targetFile = storageManager.resolveSavedDocxFile(title, "Unicode")
-                        writeInternalDocx(parsedDoc, targetFile, defaultFont = "Noto Sans Kannada", formatTag = "Modern")
+                        writeInternalDocx(parsedDoc, targetFile, defaultFont = "Noto Sans Kannada", formatTag = "Universal")
                         markSaveComplete(
-                            label = "Saved (Modern)",
-                            snackbar = if (isAutoSave) null else "Saved as ${targetFile.name} (Modern Unicode)"
+                            label = "Saved (Universal)",
+                            snackbar = if (isAutoSave) null else "Saved as ${targetFile.name} (Modern Universal Kannada)"
                         )
                     }
 
-                    // 2. Change Document Type (auto-convert current document to Nudi / Baraha / Modern Unicode)
+                    // 2. Change Document Type (auto-convert current document to Nudi / Baraha / Modern Universal Kannada)
                     exportMode.startsWith("convert_doc_") -> {
                         val targetEnc = when (exportMode.removePrefix("convert_doc_")) {
                             "nudi" -> KannadaEncodingChoice.NUDI
@@ -384,9 +443,9 @@ class EditorViewModel(
                             fileName = outFile.name,
                             fileFormat = DocFormat.DOCX,
                             detectedEncodingLabel = when (targetEnc) {
-                                KannadaEncodingChoice.NUDI -> "Nudi (Legacy ASCII)"
-                                KannadaEncodingChoice.BARAHA -> "Baraha (BRH Kannada)"
-                                KannadaEncodingChoice.UNICODE -> "Modern Unicode"
+                                KannadaEncodingChoice.NUDI -> "Nudi • ನುಡಿ (PC)"
+                                KannadaEncodingChoice.BARAHA -> "Baraha • ಬರಹ (PC)"
+                                KannadaEncodingChoice.UNICODE -> "Modern Universal Kannada • ಆಧುನಿಕ ಸಾರ್ವತ್ರಿಕ ಕನ್ನಡ"
                             },
                             currentEncoding = targetEnc,
                             shortFormatTag = targetEnc.shortBadge,
@@ -417,7 +476,7 @@ class EditorViewModel(
                         )
                         preferences.setDocumentFormatTag(
                             registered.uriString,
-                            if (fileType == TargetFileType.PDF) "Modern" else encoding.shortBadge
+                            if (fileType == TargetFileType.PDF) "Universal" else encoding.shortBadge
                         )
                         _uiState.value = _uiState.value.copy(isSaving = false)
                         ShareHelper.shareFile(
@@ -543,7 +602,7 @@ class EditorViewModel(
                 )
                 preferences.setDocumentFormatTag(
                     registered.uriString,
-                    if (fileType == TargetFileType.PDF) "Modern" else encoding.shortBadge
+                    if (fileType == TargetFileType.PDF) "Universal" else encoding.shortBadge
                 )
             }.onSuccess {
                 _uiState.value = _uiState.value.copy(
@@ -635,17 +694,17 @@ class EditorViewModel(
             when {
                 KANNADA_UNICODE_REGEX.containsMatchIn(text) -> {
                     hasUnicode = true
-                    detectedCategories.add("Modern Unicode")
+                    detectedCategories.add("Modern Universal Kannada • ಆಧುನಿಕ ಸಾರ್ವತ್ರಿಕ ಕನ್ನಡ")
                 }
                 font != null && NUDI_FONT_REGEX.containsMatchIn(font) -> {
                     hasLegacy = true
                     hasNudi = true
-                    detectedCategories.add("Nudi (Legacy ASCII)")
+                    detectedCategories.add("Nudi • ನುಡಿ (PC)")
                 }
                 font != null && BARAHA_FONT_REGEX.containsMatchIn(font) -> {
                     hasLegacy = true
                     hasBaraha = true
-                    detectedCategories.add("Baraha (BRH Kannada)")
+                    detectedCategories.add("Baraha • ಬರಹ (PC)")
                 }
                 font != null && SHREELIPI_FONT_REGEX.containsMatchIn(font) -> {
                     hasLegacy = true
@@ -658,7 +717,7 @@ class EditorViewModel(
                 HIGH_ASCII_NUDI_REGEX.containsMatchIn(text) -> {
                     hasLegacy = true
                     hasNudi = true
-                    detectedCategories.add("Nudi / ASCII (Detected)")
+                    detectedCategories.add("Nudi • ನುಡಿ (PC)")
                 }
                 LATIN_WORD_REGEX.containsMatchIn(text) -> {
                     hasEnglish = true
@@ -668,7 +727,7 @@ class EditorViewModel(
 
         val summary = when {
             detectedCategories.isEmpty() && hasEnglish -> "English / Plain Text"
-            detectedCategories.isEmpty() -> "Blank / Modern Unicode"
+            detectedCategories.isEmpty() -> "Modern Universal Kannada • ಆಧುನಿಕ ಸಾರ್ವತ್ರಿಕ ಕನ್ನಡ"
             detectedCategories.size == 1 && hasEnglish -> "${detectedCategories.first()} + English"
             else -> detectedCategories.joinToString(" + ")
         }
@@ -686,7 +745,7 @@ class EditorViewModel(
             detectedCategories.isEmpty() && hasEnglish -> "English"
             hasBaraha -> "Baraha"
             hasNudi -> "Nudi"
-            else -> "Modern"
+            else -> "Universal"
         }
 
         return DocumentInfo(

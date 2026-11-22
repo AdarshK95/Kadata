@@ -1,9 +1,10 @@
 /**
- * Kadata Offline Rich-Text Editor Controller & AndroidBridge (v13)
- * - Normalized cross-span Find & Replace (handles pasted whitespace, NBSP, zero-width chars,
- *   and multi-span DOCX runs cleanly)
- * - Seamless cursor visibility on both OS Keyboard (visualViewport) & built-in Kannada Keyboard
- * - Optional app-wide Manual Keyboard Block mode + explicit OS keyboard trigger
+ * Kadata Offline Rich-Text Editor Controller & AndroidBridge (v16)
+ * - Rock-solid forward typing (fixed caret rewind bug by preserving live selection on input
+ *   and guarding IME composition)
+ * - Custom 100-Undo / 100-Redo history manager with automatic scroll-to-section & brief highlight
+ * - Guaranteed visible blinking virtual caret + line-aware scroll (1 line phone / 2-3 lines tablet)
+ * - Normalized cross-span Find & Replace
  * - Script-split legacy PC export (Nudi 01 e / BRH Kannada + Calibri for English)
  */
 (function (global) {
@@ -11,6 +12,18 @@
 
   const paper = document.getElementById('paper');
   const originalBanner = document.getElementById('original-banner');
+  let virtualCaretEl = document.getElementById('kd-virtual-caret');
+  function ensureVirtualCaretEl() {
+    if (!virtualCaretEl) {
+      virtualCaretEl = document.createElement('div');
+      virtualCaretEl.id = 'kd-virtual-caret';
+      virtualCaretEl.setAttribute('aria-hidden', 'true');
+      document.body.appendChild(virtualCaretEl);
+    }
+    return virtualCaretEl;
+  }
+  let caretSyncInterval = null;
+  let caretSolidTimer = null;
 
   let sourceDoc = null;
   let activeConverter = 'auto';
@@ -18,8 +31,7 @@
   let savedEditableHtml = null;
   let autoSaveTimer = null;
 
-  // Find & Replace state: each entry in searchMatches is an Array of <mark> elements
-  // (a single logical match may span across multiple inline <span> nodes)
+  // Find & Replace state
   let searchMatches = [];
   let activeMatchIndex = -1;
   let lastSearchQuery = '';
@@ -28,8 +40,19 @@
   let savedCaretRange = null;
   let keyboardTopLimitPx = 0;
   let virtualKbOpen = false;
+  let isTabletLayout = false;
   let manualKeyboardBlock = false;
   let osKeyboardAllowedOnce = false;
+  let isComposing = false;
+
+  // Custom 100-Undo / 100-Redo History Manager state
+  const MAX_HISTORY_STEPS = 100;
+  let undoStack = [];
+  let redoStack = [];
+  let currentBaseline = null; // { html: string, caret: { blockIndex, charOffset } | null }
+  let historyDebounceTimer = null;
+  let isRestoringHistory = false;
+
   const KANNADA_TRAILING_SIGN_RE = /[\u0CBE-\u0CCC\u0C82\u0C83]$/;
   const ZERO_WIDTH_RE = /[\u200B\uFEFF\u00AD\u2060]/g;
 
@@ -51,22 +74,121 @@
     return !!node && (node === paper || paper.contains(node));
   }
 
-  function captureSelectionRange() {
+  function getLiveSelectionRangeInPaper() {
     const sel = window.getSelection();
-    if (!sel || sel.rangeCount === 0) return;
+    if (!sel || sel.rangeCount === 0) return null;
     const range = sel.getRangeAt(0);
     if (isNodeInsidePaper(range.startContainer) && isNodeInsidePaper(range.endContainer)) {
-      savedCaretRange = range.cloneRange();
+      return range;
     }
+    return null;
+  }
+
+  function captureSelectionRange() {
+    const live = getLiveSelectionRangeInPaper();
+    if (live) {
+      savedCaretRange = live.cloneRange();
+    }
+  }
+
+  function getEditableBlocks() {
+    const blocks = Array.from(paper.querySelectorAll('p, h1, h2, h3, h4, li, td, th'));
+    const leafBlocks = blocks.filter(el => !el.querySelector('p, h1, h2, h3, h4, li'));
+    return leafBlocks.length > 0 ? leafBlocks : [paper];
+  }
+
+  function findContainingBlock(node, blocks) {
+    let cur = node;
+    while (cur && cur !== paper) {
+      if (cur.nodeType === Node.ELEMENT_NODE) {
+        const idx = blocks.indexOf(cur);
+        if (idx !== -1) return { block: cur, index: idx };
+      }
+      cur = cur.parentNode;
+    }
+    return blocks.length > 0 ? { block: blocks[0], index: 0 } : null;
+  }
+
+  /**
+   * Serializes the current caret position as { blockIndex, charOffset } so Undo / Redo
+   * can restore the exact cursor location after replacing innerHTML.
+   */
+  function serializeCaretPosition() {
+    const range = getLiveSelectionRangeInPaper() || savedCaretRange;
+    if (!range || !isNodeInsidePaper(range.startContainer)) return null;
+
+    const blocks = getEditableBlocks();
+    const found = findContainingBlock(range.startContainer, blocks);
+    if (!found) return null;
+
+    try {
+      const pre = document.createRange();
+      pre.setStart(found.block, 0);
+      pre.setEnd(range.startContainer, range.startOffset);
+      const charOffset = pre.toString().length;
+      return { blockIndex: found.index, charOffset };
+    } catch (_) {
+      return { blockIndex: found.index, charOffset: 0 };
+    }
+  }
+
+  /**
+   * Restores a serialized { blockIndex, charOffset } caret into the DOM and returns { range, block }.
+   */
+  function restoreSerializedCaret(caretPos) {
+    const blocks = getEditableBlocks();
+    if (blocks.length === 0) return null;
+
+    const safeIdx = caretPos
+      ? Math.max(0, Math.min(caretPos.blockIndex, blocks.length - 1))
+      : 0;
+    const block = blocks[safeIdx];
+    const targetOffset = caretPos ? Math.max(0, caretPos.charOffset) : 0;
+
+    const range = document.createRange();
+    const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT, null);
+    let remaining = targetOffset;
+    let placed = false;
+    let lastTextNode = null;
+    let node;
+
+    while ((node = walker.nextNode())) {
+      lastTextNode = node;
+      const len = (node.nodeValue || '').length;
+      if (remaining <= len) {
+        range.setStart(node, remaining);
+        range.collapse(true);
+        placed = true;
+        break;
+      }
+      remaining -= len;
+    }
+
+    if (!placed) {
+      if (lastTextNode) {
+        range.setStart(lastTextNode, (lastTextNode.nodeValue || '').length);
+        range.collapse(true);
+      } else {
+        range.selectNodeContents(block);
+        range.collapse(false);
+      }
+    }
+
+    const sel = window.getSelection();
+    if (sel) {
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+    savedCaretRange = range.cloneRange();
+    return { range, block };
   }
 
   function placeCaretAtVisibleLine() {
     const sel = window.getSelection();
     if (!sel) return null;
 
-    // Pick the first visible content block currently on screen instead of jumping to the end of the doc
     const viewH = getVisibleViewportHeight();
-    const candidates = Array.from(paper.querySelectorAll('p, h1, h2, h3, li, td'));
+    const candidates = getEditableBlocks();
     let target = null;
     for (let i = 0; i < candidates.length; i++) {
       const r = candidates[i].getBoundingClientRect();
@@ -93,7 +215,11 @@
     return range;
   }
 
-  function restoreCaretInPaper() {
+  /**
+   * Restores savedCaretRange ONLY for external Compose actions (like Varnamala keyboard taps).
+   * NEVER call this during native OS typing (input event), because live selection is already ahead!
+   */
+  function restoreCaretForExternalAction() {
     paper.focus({ preventScroll: true });
     const sel = window.getSelection();
     if (!sel) return null;
@@ -106,48 +232,136 @@
         // Fall through to visible line
       }
     }
+    const live = getLiveSelectionRangeInPaper();
+    if (live) return live;
     return placeCaretAtVisibleLine();
   }
 
+  function findFirstTextNode(root) {
+    if (!root) return null;
+    if (root.nodeType === Node.TEXT_NODE && (root.nodeValue || '').length > 0) return root;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+    let n;
+    while ((n = walker.nextNode())) {
+      if ((n.nodeValue || '').length > 0) return n;
+    }
+    return null;
+  }
+
+  function findLastTextNode(root) {
+    if (!root) return null;
+    if (root.nodeType === Node.TEXT_NODE && (root.nodeValue || '').length > 0) return root;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+    let last = null;
+    let n;
+    while ((n = walker.nextNode())) {
+      if ((n.nodeValue || '').length > 0) last = n;
+    }
+    return last;
+  }
+
+  function measureCharBoundaryInTextNode(textNode, offset) {
+    const len = (textNode.nodeValue || '').length;
+    if (len === 0) return null;
+    try {
+      const r = document.createRange();
+      if (offset > 0) {
+        const clamped = Math.min(offset, len);
+        r.setStart(textNode, clamped - 1);
+        r.setEnd(textNode, clamped);
+        const rects = r.getClientRects();
+        for (let i = rects.length - 1; i >= 0; i--) {
+          const box = rects[i];
+          if (box.height > 0 && box.height < 240) {
+            return { left: box.right, top: box.top, bottom: box.bottom, height: box.height };
+          }
+        }
+      } else {
+        r.setStart(textNode, 0);
+        r.setEnd(textNode, 1);
+        const rects = r.getClientRects();
+        for (let i = 0; i < rects.length; i++) {
+          const box = rects[i];
+          if (box.height > 0 && box.height < 240) {
+            return { left: box.left, top: box.top, bottom: box.bottom, height: box.height };
+          }
+        }
+      }
+    } catch (_) {
+      // Fall through
+    }
+    return null;
+  }
+
   /**
-   * Accurately measures the caret's viewport rect — NEVER falls back to #paper itself
-   * (whose height includes 2400px of bottom scroll padding and caused overshoot jumps).
+   * Zero-mutation, pixel-exact viewport caret measurement for Android Chromium WebView.
+   * Collapsed Ranges in Chromium often return empty getClientRects() — measuring an adjacent
+   * 1-character non-collapsed Range gives exact (left, top, bottom, height) with zero DOM mutation!
    */
   function measureCaretClientRect(range) {
     if (!range) return null;
-    const rects = range.getClientRects();
-    if (rects && rects.length > 0) {
-      const r = rects[rects.length - 1];
-      if (r.height > 0 && r.height < 220) return r;
-    }
-    const bRect = range.getBoundingClientRect();
-    if (bRect && bRect.height > 0 && bRect.height < 220) return bRect;
+    const sc = range.startContainer;
+    const so = range.startOffset;
 
-    // Collapsed caret on an empty line or between nodes: measure nearest block element (not #paper)
-    let el = range.startContainer.nodeType === Node.ELEMENT_NODE
-      ? range.startContainer
-      : range.startContainer.parentElement;
+    // 1. Inside a TextNode: measure 1 adjacent character (exact X & Y across wrapped lines!)
+    if (sc && sc.nodeType === Node.TEXT_NODE) {
+      const charHit = measureCharBoundaryInTextNode(sc, so);
+      if (charHit) return charHit;
+    }
+
+    // 2. Inside an Element node (e.g. <p> or <span>): inspect adjacent child text node
+    if (sc && sc.nodeType === Node.ELEMENT_NODE) {
+      const children = sc.childNodes;
+      if (so > 0 && so <= children.length) {
+        const prevText = findLastTextNode(children[so - 1]);
+        if (prevText) {
+          const hit = measureCharBoundaryInTextNode(prevText, (prevText.nodeValue || '').length);
+          if (hit) return hit;
+        }
+      }
+      if (so < children.length) {
+        const nextText = findFirstTextNode(children[so]);
+        if (nextText) {
+          const hit = measureCharBoundaryInTextNode(nextText, 0);
+          if (hit) return hit;
+        }
+      }
+    }
+
+    // 3. Native collapsed range rect if Chromium provides a valid non-zero box
+    try {
+      const rects = range.getClientRects();
+      if (rects && rects.length > 0) {
+        const r = rects[rects.length - 1];
+        if (r.height > 0 && r.height < 240) {
+          return { left: r.left, top: r.top, bottom: r.bottom, height: r.height };
+        }
+      }
+      const bRect = range.getBoundingClientRect();
+      if (bRect && bRect.height > 0 && bRect.height < 240) {
+        return { left: bRect.left, top: bRect.top, bottom: bRect.bottom, height: bRect.height };
+      }
+    } catch (_) {
+      // Fall through
+    }
+
+    // 4. Empty paragraph (<p><br></p>): compute exact inner start-of-line position
+    const el = sc && sc.nodeType === Node.ELEMENT_NODE ? sc : (sc ? sc.parentElement : null);
     if (el && el !== paper) {
       const elRect = el.getBoundingClientRect();
-      if (elRect && elRect.height > 0 && elRect.height < 320) return elRect;
-    }
-
-    // Last-resort exact measurement using a transient zero-width marker span
-    try {
-      const marker = document.createElement('span');
-      marker.textContent = '\u200B';
-      const clone = range.cloneRange();
-      clone.collapse(true);
-      clone.insertNode(marker);
-      const mRect = marker.getBoundingClientRect();
-      const parent = marker.parentNode;
-      if (parent) {
-        parent.removeChild(marker);
-        parent.normalize();
+      if (elRect && (elRect.height > 0 || elRect.top !== 0)) {
+        const cs = window.getComputedStyle(el);
+        const padL = parseFloat(cs.paddingLeft) || 0;
+        const padT = parseFloat(cs.paddingTop) || 0;
+        const lh = getEditorLineHeightPx();
+        const h = Math.round(lh * 0.80);
+        return {
+          left: elRect.left + padL,
+          top: elRect.top + padT,
+          bottom: elRect.top + padT + h,
+          height: h
+        };
       }
-      if (mRect && (mRect.height > 0 || mRect.top !== 0)) return mRect;
-    } catch (_) {
-      // Ignore marker failure
     }
     return null;
   }
@@ -172,35 +386,150 @@
     return window.innerHeight || document.documentElement.clientHeight || 500;
   }
 
-  /**
-   * Idempotent, clamped absolute scroll that puts the caret cleanly into view
-   * without ever overshooting into the blank 2400px bottom cushion.
-   */
-  function scrollCursorToSafePosition(preferNearTop) {
+  function getEditorLineHeightPx() {
     try {
-      const range = restoreCaretInPaper();
-      const rect = measureCaretClientRect(range);
-      if (!rect) return;
+      const cs = window.getComputedStyle(paper);
+      const lh = parseFloat(cs.lineHeight);
+      if (!isNaN(lh) && lh > 12) return lh;
+      const fs = parseFloat(cs.fontSize);
+      if (!isNaN(fs) && fs > 8) return fs * 1.75;
+    } catch (_) {
+      // Fallback
+    }
+    return 38;
+  }
+
+  /**
+   * Keeps 1 full line above cursor on phones (cursor on line 2) and 2-3 full lines on tablets.
+   */
+  function getDesiredTopContextPx() {
+    const lh = getEditorLineHeightPx();
+    const viewH = getVisibleViewportHeight();
+    if (isTabletLayout) {
+      return Math.min(Math.round(lh * 2.65) + 12, Math.round(viewH * 0.38));
+    }
+    return Math.min(Math.round(lh * 1.15) + 10, Math.round(viewH * 0.32));
+  }
+
+  function startCaretSyncLoop() {
+    if (caretSyncInterval) return;
+    caretSyncInterval = setInterval(() => {
+      if (virtualKbOpen && !isOriginalView) {
+        updateVirtualCaretVisual(false);
+      }
+    }, 220);
+  }
+
+  function stopCaretSyncLoop() {
+    if (caretSyncInterval) {
+      clearInterval(caretSyncInterval);
+      caretSyncInterval = null;
+    }
+  }
+
+  function hideVirtualCaret() {
+    stopCaretSyncLoop();
+    if (virtualCaretEl) {
+      virtualCaretEl.classList.remove('visible');
+      virtualCaretEl.classList.remove('solid');
+    }
+  }
+
+  function updateVirtualCaretVisual(holdSolidBriefly) {
+    const el = ensureVirtualCaretEl();
+    if (!virtualKbOpen || isOriginalView) {
+      el.classList.remove('visible');
+      return;
+    }
+    let range = savedCaretRange;
+    if (!range || !isNodeInsidePaper(range.startContainer)) {
+      const live = getLiveSelectionRangeInPaper();
+      if (live) {
+        range = live.cloneRange();
+        savedCaretRange = range;
+      } else {
+        range = placeCaretAtVisibleLine();
+      }
+    }
+    if (!range) {
+      el.classList.remove('visible');
+      return;
+    }
+
+    const rect = measureCaretClientRect(range);
+    if (!rect) {
+      el.classList.remove('visible');
+      return;
+    }
+
+    const viewH = getVisibleViewportHeight();
+    const viewW = window.innerWidth || document.documentElement.clientWidth || 400;
+    if (rect.bottom < 0 || rect.top > viewH + 8) {
+      el.classList.remove('visible');
+      return;
+    }
+
+    const lh = getEditorLineHeightPx();
+    const caretHeight = (rect.height > 10 && rect.height < lh * 1.8)
+      ? Math.round(rect.height)
+      : Math.round(lh * 0.78);
+    // Position using fixed viewport coordinates directly (immune to scrollY/body offset quirks!)
+    const caretLeft = Math.max(2, Math.min(Math.round(rect.left), viewW - 6));
+    const caretTop = Math.round(rect.top + Math.max(0, (rect.height - caretHeight) / 2));
+
+    el.style.left = `${caretLeft}px`;
+    el.style.top = `${caretTop}px`;
+    el.style.height = `${caretHeight}px`;
+    el.classList.add('visible');
+
+    if (holdSolidBriefly) {
+      el.classList.add('solid');
+      if (caretSolidTimer) clearTimeout(caretSolidTimer);
+      caretSolidTimer = setTimeout(() => {
+        if (virtualCaretEl) virtualCaretEl.classList.remove('solid');
+      }, 550);
+    }
+  }
+
+  /**
+   * Pure read-only scroll adjustment — NEVER overwrites window.getSelection()!
+   */
+  function scrollCaretIntoSafeView(alignToComfortBand) {
+    try {
+      const range = getLiveSelectionRangeInPaper()
+        || (savedCaretRange && isNodeInsidePaper(savedCaretRange.startContainer) ? savedCaretRange : null);
+      if (!range) {
+        if (virtualKbOpen) updateVirtualCaretVisual();
+        return;
+      }
+
+      const rect = measureCaretClientRect(range, virtualKbOpen);
+      if (!rect) {
+        if (virtualKbOpen) updateVirtualCaretVisual();
+        return;
+      }
 
       const viewHeight = getVisibleViewportHeight();
+      const desiredTop = getDesiredTopContextPx();
       const caretPageTop = window.scrollY + rect.top;
       const contentBottom = getRealContentBottomPageY();
-      // Never scroll further down than keeping at least ~80px of real document content visible
-      const maxReasonableScroll = Math.max(0, contentBottom - Math.min(80, Math.round(viewHeight * 0.25)));
+      const maxReasonableScroll = Math.max(0, contentBottom - Math.min(90, Math.round(viewHeight * 0.30)));
 
       let targetScrollY = null;
       if (virtualKbOpen) {
-        const safeBottom = (keyboardTopLimitPx > 80)
-          ? Math.min(viewHeight - 24, keyboardTopLimitPx - 16)
-          : Math.max(96, viewHeight - 28);
-        if (preferNearTop || rect.top < 12 || rect.bottom > safeBottom) {
-          // Place active line cleanly near the top (24px margin) of the visible pane
-          targetScrollY = caretPageTop - 24;
+        const safeBottom = (keyboardTopLimitPx > 90)
+          ? Math.min(viewHeight - 28, keyboardTopLimitPx - 18)
+          : Math.max(desiredTop + 56, viewHeight - 32);
+
+        const tooCloseToTop = rect.top < Math.max(18, desiredTop - 16);
+        const tooCloseToBottom = rect.bottom > safeBottom;
+        if (tooCloseToTop || tooCloseToBottom || (alignToComfortBand && rect.top > safeBottom - 36)) {
+          targetScrollY = caretPageTop - desiredTop;
         }
       } else {
-        const safeBottom = Math.max(90, viewHeight - 52);
+        const safeBottom = Math.max(desiredTop + 48, viewHeight - 52);
         if (rect.top < 16 || rect.bottom > safeBottom) {
-          targetScrollY = caretPageTop - Math.min(110, Math.round(viewHeight * 0.30));
+          targetScrollY = caretPageTop - desiredTop;
         }
       }
 
@@ -210,43 +539,240 @@
           window.scrollTo({ top: clampedY, left: 0, behavior: 'auto' });
         }
       }
+      if (virtualKbOpen) updateVirtualCaretVisual();
     } catch (_) {
-      // Ignore scrolling errors
+      if (virtualKbOpen) updateVirtualCaretVisual();
     }
   }
 
-  function scrollCursorLineToTop() {
-    scrollCursorToSafePosition(true);
+  // =========================================================================
+  // Custom 100-Undo / 100-Redo History Manager with Scroll-to-Section
+  // =========================================================================
+  function takeCleanSnapshot(caretOverride) {
+    const cleanClone = getCleanPaperClone();
+    return {
+      html: cleanClone.innerHTML,
+      caret: caretOverride !== undefined ? caretOverride : serializeCaretPosition()
+    };
   }
 
-  function scrollCaretIntoView(forceCenterIfHidden) {
-    scrollCursorToSafePosition(!!forceCenterIfHidden);
+  function resetHistoryToCurrent() {
+    if (historyDebounceTimer) {
+      clearTimeout(historyDebounceTimer);
+      historyDebounceTimer = null;
+    }
+    undoStack = [];
+    redoStack = [];
+    currentBaseline = takeCleanSnapshot(null);
   }
 
-  document.addEventListener('selectionchange', captureSelectionRange);
+  function commitHistoryStep(preEditCaret) {
+    if (isOriginalView || isRestoringHistory) return;
+    if (historyDebounceTimer) {
+      clearTimeout(historyDebounceTimer);
+      historyDebounceTimer = null;
+    }
+    const nextSnap = takeCleanSnapshot();
+    if (!currentBaseline) {
+      currentBaseline = nextSnap;
+      return;
+    }
+    if (nextSnap.html === currentBaseline.html) {
+      currentBaseline.caret = nextSnap.caret;
+      return;
+    }
+    const prevEntry = {
+      html: currentBaseline.html,
+      caret: preEditCaret || nextSnap.caret || currentBaseline.caret
+    };
+    undoStack.push(prevEntry);
+    if (undoStack.length > MAX_HISTORY_STEPS) {
+      undoStack.shift();
+    }
+    redoStack = [];
+    currentBaseline = nextSnap;
+  }
+
+  function scheduleHistoryCommit(immediate) {
+    if (isOriginalView || isRestoringHistory || isComposing) return;
+    if (historyDebounceTimer) clearTimeout(historyDebounceTimer);
+    if (immediate) {
+      commitHistoryStep(null);
+    } else {
+      historyDebounceTimer = setTimeout(() => {
+        historyDebounceTimer = null;
+        commitHistoryStep(null);
+      }, 450);
+    }
+  }
+
+  function scrollToRestoredHistoryTarget(restored) {
+    if (!restored) return;
+    try {
+      const { range, block } = restored;
+      const rect = measureCaretClientRect(range, true) || (block ? block.getBoundingClientRect() : null);
+      if (rect) {
+        const viewH = getVisibleViewportHeight();
+        const targetTop = Math.round(viewH * 0.32);
+        const destY = Math.max(0, window.scrollY + rect.top - targetTop);
+        window.scrollTo({ top: destY, left: 0, behavior: 'smooth' });
+      } else if (block && block.scrollIntoView) {
+        block.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+
+      if (block && block !== paper) {
+        block.classList.remove('kd-history-flash');
+        void block.offsetWidth;
+        block.classList.add('kd-history-flash');
+        setTimeout(() => block.classList.remove('kd-history-flash'), 900);
+      }
+      if (virtualKbOpen) {
+        setTimeout(() => updateVirtualCaretVisual(), 120);
+      }
+    } catch (_) {
+      // Ignore scroll errors
+    }
+  }
+
+  function performUndo() {
+    if (isOriginalView) return;
+    if (historyDebounceTimer) {
+      clearTimeout(historyDebounceTimer);
+      historyDebounceTimer = null;
+    }
+    const liveSnap = takeCleanSnapshot();
+    if (currentBaseline && liveSnap.html !== currentBaseline.html) {
+      commitHistoryStep(null);
+    }
+
+    if (undoStack.length === 0) return;
+
+    isRestoringHistory = true;
+    try {
+      clearSearchHighlights(true);
+      if (currentBaseline) {
+        redoStack.push(currentBaseline);
+        if (redoStack.length > MAX_HISTORY_STEPS) {
+          redoStack.shift();
+        }
+      }
+      const prev = undoStack.pop();
+      currentBaseline = prev;
+      paper.innerHTML = prev.html;
+      const restored = restoreSerializedCaret(prev.caret);
+      scrollToRestoredHistoryTarget(restored);
+    } finally {
+      isRestoringHistory = false;
+    }
+
+    notifyAndroid('onContentDirty');
+    scheduleAutoSave();
+  }
+
+  function performRedo() {
+    if (isOriginalView) return;
+    if (redoStack.length === 0) return;
+
+    isRestoringHistory = true;
+    try {
+      clearSearchHighlights(true);
+      if (currentBaseline) {
+        undoStack.push(currentBaseline);
+        if (undoStack.length > MAX_HISTORY_STEPS) {
+          undoStack.shift();
+        }
+      }
+      const next = redoStack.pop();
+      currentBaseline = next;
+      paper.innerHTML = next.html;
+      const restored = restoreSerializedCaret(next.caret);
+      scrollToRestoredHistoryTarget(restored);
+    } finally {
+      isRestoringHistory = false;
+    }
+
+    notifyAndroid('onContentDirty');
+    scheduleAutoSave();
+  }
+
+  // =========================================================================
+  // Event Listeners (IME-safe & Never Rewinds Caret!)
+  // =========================================================================
+  paper.addEventListener('compositionstart', () => {
+    isComposing = true;
+  });
+
+  paper.addEventListener('compositionend', () => {
+    isComposing = false;
+    captureSelectionRange();
+    scheduleHistoryCommit(false);
+    scrollCaretIntoSafeView(false);
+  });
+
+  document.addEventListener('selectionchange', () => {
+    if (isRestoringHistory) return;
+    captureSelectionRange();
+    if (virtualKbOpen) updateVirtualCaretVisual();
+  });
+
+  window.addEventListener('scroll', () => {
+    if (virtualKbOpen) updateVirtualCaretVisual();
+  }, { passive: true });
+
   paper.addEventListener('keyup', () => {
     captureSelectionRange();
-    scrollCaretIntoView(false);
+    if (!isComposing) scrollCaretIntoSafeView(false);
   });
+
   paper.addEventListener('mouseup', captureSelectionRange);
+
   paper.addEventListener('touchend', () => {
     captureSelectionRange();
-    if (!manualKeyboardBlock && !virtualKbOpen) {
-      setTimeout(() => scrollCaretIntoView(true), 220);
+    if (virtualKbOpen) {
+      setTimeout(() => updateVirtualCaretVisual(), 40);
+    } else if (!manualKeyboardBlock) {
+      setTimeout(() => scrollCaretIntoSafeView(false), 220);
     }
   });
+
   paper.addEventListener('focus', () => {
     captureSelectionRange();
-    setTimeout(() => scrollCaretIntoView(true), 180);
+    if (!virtualKbOpen) {
+      setTimeout(() => scrollCaretIntoSafeView(false), 180);
+    }
   });
 
   if (window.visualViewport) {
     window.visualViewport.addEventListener('resize', () => {
-      setTimeout(() => scrollCaretIntoView(true), 60);
+      if (!isComposing) {
+        setTimeout(() => scrollCaretIntoSafeView(false), 60);
+      }
     });
   }
+
   window.addEventListener('resize', () => {
-    setTimeout(() => scrollCaretIntoView(true), 80);
+    if (!isComposing) {
+      setTimeout(() => scrollCaretIntoSafeView(false), 80);
+    }
+  });
+
+  paper.addEventListener('input', (e) => {
+    if (isOriginalView || isRestoringHistory) return;
+    // CRITICAL: Capture the new post-keystroke caret IMMEDIATELY before scrolling or saving!
+    captureSelectionRange();
+    notifyAndroid('onContentDirty');
+    scheduleAutoSave();
+    if (!isComposing) {
+      const iType = (e && e.inputType) || '';
+      const data = (e && e.data) || '';
+      const isBoundary =
+        iType === 'insertParagraph' ||
+        iType === 'insertLineBreak' ||
+        iType === 'insertFromPaste' ||
+        data === ' ';
+      scheduleHistoryCommit(isBoundary);
+      scrollCaretIntoSafeView(false);
+    }
   });
 
   // =========================================================================
@@ -326,22 +852,10 @@
     return nodes;
   }
 
-  function collectSearchBlocks() {
-    const blocks = Array.from(paper.querySelectorAll('p, h1, h2, h3, h4, li, td, th'));
-    // Filter out container elements that wrap inner <p> blocks (like <td> containing <p>)
-    const leafBlocks = blocks.filter(el => !el.querySelector('p, h1, h2, h3, h4, li'));
-    return leafBlocks.length > 0 ? leafBlocks : [paper];
-  }
-
-  /**
-   * Builds a normalized string for a block where runs of whitespace/NBSP collapse to ' '
-   * and zero-width characters are ignored, while keeping exact (node, startOffset, endOffset)
-   * coordinates for every normalized character.
-   */
   function buildNormalizedBlockMap(blockEl) {
     const textNodes = collectTextNodes(blockEl);
     let normChars = '';
-    const map = []; // Each entry: { node, start, end }
+    const map = [];
     let inSpace = false;
 
     for (let t = 0; t < textNodes.length; t++) {
@@ -381,7 +895,6 @@
       const startEntry = map[pos];
       const endEntry = map[pos + needleLen - 1];
       if (startEntry && endEntry) {
-        // Group contiguous segments per text node for this logical match
         const segments = [];
         for (let k = pos; k < pos + needleLen; k++) {
           const entry = map[k];
@@ -401,8 +914,6 @@
 
   function wrapMatchSegments(segments) {
     const createdMarks = [];
-    // Process segments in reverse order if multiple segments share a node (safety),
-    // though each logical match has distinct nodes per segment.
     for (let s = 0; s < segments.length; s++) {
       const seg = segments[s];
       const node = seg.node;
@@ -439,13 +950,12 @@
     }
 
     const needleLower = normalizedQuery.toLowerCase();
-    const blocks = collectSearchBlocks();
+    const blocks = getEditableBlocks();
 
     for (let b = 0; b < blocks.length; b++) {
       const blockMatches = findMatchesInBlock(blocks[b], needleLower);
       if (blockMatches.length === 0) continue;
 
-      // Wrap in reverse order within the block so earlier textNode offsets stay valid!
       const blockGroups = new Array(blockMatches.length);
       for (let m = blockMatches.length - 1; m >= 0; m--) {
         blockGroups[m] = wrapMatchSegments(blockMatches[m]);
@@ -749,21 +1259,16 @@
     notifyAndroid('onDraftChanged', html, idmJson);
   }
 
-  function markDirtyAndScheduleDraft() {
-    if (isOriginalView) return;
-    notifyAndroid('onContentDirty');
-    scheduleAutoSave();
-    scrollCaretIntoView(false);
-  }
-
-  paper.addEventListener('input', markDirtyAndScheduleDraft);
-
+  // =========================================================================
+  // Public Android -> WebView Editor Controller API
+  // =========================================================================
   global.KannadaDocEditor = {
     loadDocument(parsedDocJson, converterOverride, savedDraftHtml) {
       try {
         sourceDoc = JSON.parse(parsedDocJson);
         activeConverter = converterOverride || 'auto';
         isOriginalView = false;
+        savedCaretRange = null;
         originalBanner.classList.add('hidden');
         paper.classList.remove('read-only-original');
         paper.setAttribute('contenteditable', 'true');
@@ -772,11 +1277,13 @@
         if (savedDraftHtml && savedDraftHtml.trim().length > 0) {
           paper.innerHTML = savedDraftHtml;
           unwrapMarksIn(paper);
+          resetHistoryToCurrent();
           notifyAndroid('onDocumentLoaded', 0, '', true);
           return;
         }
 
         const report = renderDocument(sourceDoc, activeConverter, false);
+        resetHistoryToCurrent();
         notifyAndroid('onDocumentLoaded', report.convertedCount, report.detectedSummary, false);
       } catch (err) {
         notifyAndroid('onEditorError', String(err));
@@ -791,6 +1298,7 @@
       paper.classList.remove('read-only-original');
       paper.setAttribute('contenteditable', 'true');
       const report = renderDocument(sourceDoc, activeConverter, false);
+      resetHistoryToCurrent();
       flushDraftNow();
       notifyAndroid('onDocumentLoaded', report.convertedCount, report.detectedSummary, false);
     },
@@ -801,6 +1309,7 @@
       if (enabled && !isOriginalView) {
         savedEditableHtml = getCleanPaperClone().innerHTML;
         isOriginalView = true;
+        hideVirtualCaret();
         originalBanner.classList.remove('hidden');
         paper.classList.add('read-only-original');
         paper.setAttribute('contenteditable', 'false');
@@ -821,13 +1330,13 @@
 
     setFontSize(sizePt) {
       document.documentElement.style.setProperty('--editor-font-size', `${sizePt}pt`);
+      if (virtualKbOpen) updateVirtualCaretVisual();
     },
 
     setDarkTheme(enabled) {
       document.body.classList.toggle('dark-theme', !!enabled);
     },
 
-    // --- Manual Keyboard Block & Explicit System Keyboard Trigger ---
     setManualKeyboardBlock(blocked) {
       manualKeyboardBlock = !!blocked;
       if (manualKeyboardBlock) {
@@ -842,9 +1351,10 @@
       osKeyboardAllowedOnce = true;
       document.body.classList.remove('virtual-kb-open');
       document.body.classList.remove('tablet-kb-open');
+      hideVirtualCaret();
       paper.removeAttribute('inputmode');
-      restoreCaretInPaper();
-      setTimeout(() => scrollCursorToSafePosition(false), 220);
+      restoreCaretForExternalAction();
+      setTimeout(() => scrollCaretIntoSafeView(false), 220);
     },
 
     dismissSystemKeyboard() {
@@ -879,10 +1389,20 @@
       const repText = replacement == null ? '' : String(replacement);
       const nextIdx = activeMatchIndex;
 
+      let preCaret = null;
       if (group && group.length > 0) {
+        const blocks = getEditableBlocks();
+        const found = findContainingBlock(group[0], blocks);
+        if (found) preCaret = { blockIndex: found.index, charOffset: 0 };
+
         const firstMark = group[0];
         if (firstMark.parentNode) {
-          firstMark.parentNode.replaceChild(document.createTextNode(repText), firstMark);
+          const repNode = document.createTextNode(repText);
+          firstMark.parentNode.replaceChild(repNode, firstMark);
+          const r = document.createRange();
+          r.setStartAfter(repNode);
+          r.collapse(true);
+          savedCaretRange = r;
         }
         for (let i = 1; i < group.length; i++) {
           if (group[i].parentNode) {
@@ -893,7 +1413,9 @@
 
       const queryToKeep = lastSearchQuery;
       unwrapMarksIn(paper);
-      markDirtyAndScheduleDraft();
+      commitHistoryStep(preCaret);
+      notifyAndroid('onContentDirty');
+      scheduleAutoSave();
       if (queryToKeep) {
         performSearch(queryToKeep, nextIdx);
       }
@@ -909,14 +1431,15 @@
       unwrapMarksIn(paper);
       const needleLower = normalizedQuery.toLowerCase();
       const repText = replacement == null ? '' : String(replacement);
-      const blocks = collectSearchBlocks();
+      const blocks = getEditableBlocks();
       let count = 0;
+      let firstChangedBlockIdx = -1;
 
       for (let b = 0; b < blocks.length; b++) {
         const blockMatches = findMatchesInBlock(blocks[b], needleLower);
         if (blockMatches.length === 0) continue;
+        if (firstChangedBlockIdx === -1) firstChangedBlockIdx = b;
 
-        // Replace in reverse order so earlier node offsets remain valid
         for (let m = blockMatches.length - 1; m >= 0; m--) {
           const segs = blockMatches[m];
           const marks = wrapMatchSegments(segs);
@@ -939,7 +1462,12 @@
       activeMatchIndex = -1;
       lastSearchQuery = '';
       if (count > 0) {
-        markDirtyAndScheduleDraft();
+        const preCaret = firstChangedBlockIdx >= 0
+          ? { blockIndex: firstChangedBlockIdx, charOffset: 0 }
+          : null;
+        commitHistoryStep(preCaret);
+        notifyAndroid('onContentDirty');
+        scheduleAutoSave();
       }
       notifyAndroid('onSearchResults', 0, 0);
       notifyAndroid('onReplaceDone', count);
@@ -952,18 +1480,28 @@
     // --- Floating Kannada Varnamala Keyboard API ---
     setVirtualKeyboardMode(enabled, isTabletSideMode, topLimitPx) {
       virtualKbOpen = !!enabled;
+      isTabletLayout = !!isTabletSideMode;
       if (virtualKbOpen) {
         osKeyboardAllowedOnce = false;
         document.body.classList.add('virtual-kb-open');
-        document.body.classList.toggle('tablet-kb-open', !!isTabletSideMode);
+        document.body.classList.toggle('tablet-kb-open', isTabletLayout);
         keyboardTopLimitPx = (typeof topLimitPx === 'number' && topLimitPx > 0) ? topLimitPx : 0;
         applyInputModeState();
-        requestAnimationFrame(() => scrollCursorToSafePosition(true));
-        setTimeout(() => scrollCursorToSafePosition(true), 180);
+        captureSelectionRange();
+        startCaretSyncLoop();
+        requestAnimationFrame(() => {
+          scrollCaretIntoSafeView(true);
+          updateVirtualCaretVisual(true);
+        });
+        setTimeout(() => {
+          scrollCaretIntoSafeView(false);
+          updateVirtualCaretVisual(true);
+        }, 200);
       } else {
         document.body.classList.remove('virtual-kb-open');
         document.body.classList.remove('tablet-kb-open');
         keyboardTopLimitPx = 0;
+        hideVirtualCaret();
         applyInputModeState();
       }
     },
@@ -971,19 +1509,20 @@
     updateKeyboardTopLimit(topLimitPx) {
       keyboardTopLimitPx = (typeof topLimitPx === 'number' && topLimitPx > 0) ? topLimitPx : 0;
       if (virtualKbOpen) {
-        scrollCursorToSafePosition(false);
+        scrollCaretIntoSafeView(false);
       }
     },
 
     scrollCursorToTop() {
-      scrollCursorLineToTop(true);
+      scrollCaretIntoSafeView(true);
     },
 
     insertTextAtCursor(text, isSubscriptModifier) {
       if (isOriginalView || !text) return;
-      const range = restoreCaretInPaper();
+      const range = restoreCaretForExternalAction();
       if (!range) return;
 
+      const preCaret = serializeCaretPosition();
       const str = String(text);
       let insertedBeforeMatra = false;
 
@@ -994,79 +1533,105 @@
           const prevChar = textNode.nodeValue.slice(offset - 1, offset);
           const beforePrev = textNode.nodeValue.slice(offset - 2, offset - 1);
           const beforeCode = beforePrev.charCodeAt(0);
-          const isPrevConsonant = beforeCode >= 0x0C95 && beforeCode <= 0x0CB9;
+          const isPrevConsonant = (beforeCode >= 0x0C95 && beforeCode <= 0x0CB9) || beforeCode === 0x0CB1 || beforeCode === 0x0CDE;
           if (isPrevConsonant && KANNADA_TRAILING_SIGN_RE.test(prevChar)) {
+            const cur = textNode.nodeValue;
+            textNode.nodeValue = cur.slice(0, offset - 1) + str + cur.slice(offset - 1);
+            const newOff = offset + str.length;
             const sel = window.getSelection();
-            const preMatraRange = document.createRange();
-            preMatraRange.setStart(textNode, offset - 1);
-            preMatraRange.setEnd(textNode, offset - 1);
-            sel.removeAllRanges();
-            sel.addRange(preMatraRange);
-
-            const ok = document.execCommand('insertText', false, str);
-            if (!ok) {
-              const cur = textNode.nodeValue;
-              textNode.nodeValue = cur.slice(0, offset - 1) + str + cur.slice(offset - 1);
+            const afterMatra = document.createRange();
+            afterMatra.setStart(textNode, Math.min(newOff, textNode.nodeValue.length));
+            afterMatra.collapse(true);
+            if (sel) {
+              sel.removeAllRanges();
+              sel.addRange(afterMatra);
             }
-            const curSel = window.getSelection();
-            if (curSel && curSel.rangeCount > 0) {
-              const r2 = curSel.getRangeAt(0);
-              if (r2.startContainer.nodeType === Node.TEXT_NODE) {
-                const newOff = Math.min(r2.startOffset + 1, r2.startContainer.nodeValue.length);
-                const afterMatra = document.createRange();
-                afterMatra.setStart(r2.startContainer, newOff);
-                afterMatra.setEnd(r2.startContainer, newOff);
-                curSel.removeAllRanges();
-                curSel.addRange(afterMatra);
-              }
-            }
+            savedCaretRange = afterMatra.cloneRange();
             insertedBeforeMatra = true;
           }
         }
       }
 
       if (!insertedBeforeMatra) {
-        const ok = document.execCommand('insertText', false, str);
-        if (!ok) {
-          range.deleteContents();
+        // Direct deterministic Range insertion guarantees caret ALWAYS advances forward to the RIGHT!
+        range.deleteContents();
+        if (range.startContainer.nodeType === Node.TEXT_NODE) {
+          const textNode = range.startContainer;
+          const off = range.startOffset;
+          const val = textNode.nodeValue || '';
+          textNode.nodeValue = val.slice(0, off) + str + val.slice(off);
+          const nextRange = document.createRange();
+          nextRange.setStart(textNode, off + str.length);
+          nextRange.collapse(true);
+          const sel = window.getSelection();
+          if (sel) {
+            sel.removeAllRanges();
+            sel.addRange(nextRange);
+          }
+          savedCaretRange = nextRange.cloneRange();
+        } else {
           const tNode = document.createTextNode(str);
           range.insertNode(tNode);
-          range.setStartAfter(tNode);
-          range.collapse(true);
+          const nextRange = document.createRange();
+          nextRange.setStart(tNode, str.length);
+          nextRange.collapse(true);
           const sel = window.getSelection();
-          sel.removeAllRanges();
-          sel.addRange(range);
+          if (sel) {
+            sel.removeAllRanges();
+            sel.addRange(nextRange);
+          }
+          savedCaretRange = nextRange.cloneRange();
         }
       }
 
-      captureSelectionRange();
-      scrollCaretIntoView(false);
-      markDirtyAndScheduleDraft();
+      commitHistoryStep(preCaret);
+      scrollCaretIntoSafeView(false);
+      updateVirtualCaretVisual(true);
+      notifyAndroid('onContentDirty');
+      scheduleAutoSave();
     },
 
     deleteBackAtCursor() {
       if (isOriginalView) return;
-      restoreCaretInPaper();
+      restoreCaretForExternalAction();
+      const preCaret = serializeCaretPosition();
       document.execCommand('delete', false, null);
       captureSelectionRange();
-      markDirtyAndScheduleDraft();
+      commitHistoryStep(preCaret);
+      scrollCaretIntoSafeView(false);
+      updateVirtualCaretVisual(true);
+      notifyAndroid('onContentDirty');
+      scheduleAutoSave();
     },
 
     insertNewLineAtCursor() {
       if (isOriginalView) return;
-      restoreCaretInPaper();
+      restoreCaretForExternalAction();
+      const preCaret = serializeCaretPosition();
       const ok = document.execCommand('insertParagraph', false, null);
       if (!ok) {
         document.execCommand('insertLineBreak', false, null);
       }
       captureSelectionRange();
-      scrollCaretIntoView(false);
-      markDirtyAndScheduleDraft();
+      commitHistoryStep(preCaret);
+      scrollCaretIntoSafeView(false);
+      updateVirtualCaretVisual(true);
+      notifyAndroid('onContentDirty');
+      scheduleAutoSave();
     },
 
     execFormat(command) {
       if (isOriginalView) return;
+      if (command === 'undo') {
+        performUndo();
+        return;
+      }
+      if (command === 'redo') {
+        performRedo();
+        return;
+      }
       paper.focus();
+      const preCaret = serializeCaretPosition();
       switch (command) {
         case 'bold': document.execCommand('bold'); break;
         case 'italic': document.execCommand('italic'); break;
@@ -1079,10 +1644,11 @@
         case 'alignLeft': document.execCommand('justifyLeft'); break;
         case 'alignCenter': document.execCommand('justifyCenter'); break;
         case 'alignRight': document.execCommand('justifyRight'); break;
-        case 'undo': document.execCommand('undo'); break;
-        case 'redo': document.execCommand('redo'); break;
       }
-      markDirtyAndScheduleDraft();
+      captureSelectionRange();
+      commitHistoryStep(preCaret);
+      notifyAndroid('onContentDirty');
+      scheduleAutoSave();
     },
 
     flushDraft() {

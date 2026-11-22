@@ -50,6 +50,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.kannadadoc.converter.KannadaFormat
+import com.kannadadoc.data.local.DefaultSaveFormat
 import com.kannadadoc.converter.KannadaTextConverter
 import kotlinx.coroutines.launch
 
@@ -189,7 +190,7 @@ fun ConverterScreen(
                                     text = if (inputText.isBlank()) {
                                         if (knOnly) "ಸ್ವಯಂ ಪತ್ತೆ ಸಿದ್ಧವಾಗಿದೆ" else "Auto-detect ready"
                                     } else {
-                                        val label = if (knOnly) effectiveSourceFormat.labelKn else detectedInfo.confidenceNoteEn
+                                        val label = effectiveSourceFormat.bilingualTitle
                                         if (knOnly) "ಪತ್ತೆಯಾದದ್ದು: $label" else "Detected: $label"
                                     },
                                     style = MaterialTheme.typography.labelSmall,
@@ -252,7 +253,7 @@ fun ConverterScreen(
                                 FilterChip(
                                     selected = inputLegacyKind == fmt,
                                     onClick = { inputLegacyKind = fmt },
-                                    label = { Text(if (knOnly) fmt.labelKn else fmt.labelEn) }
+                                    label = { Text(fmt.bilingualTitle) }
                                 )
                             }
                         }
@@ -263,8 +264,8 @@ fun ConverterScreen(
                         onValueChange = { inputText = it },
                         placeholder = {
                             Text(
-                                if (knOnly) "ನುಡಿ, ಬರಹ ಅಥವಾ ಯೂನಿಕೋಡ್ ಕನ್ನಡ ಪಠ್ಯವನ್ನು ಇಲ್ಲಿ ಅಂಟಿಸಿ..."
-                                else "Paste Nudi, Baraha, or Unicode Kannada text here..."
+                                if (knOnly) "ನುಡಿ, ಬರಹ ಅಥವಾ ಆಧುನಿಕ ಸಾರ್ವತ್ರಿಕ ಕನ್ನಡ ಪಠ್ಯವನ್ನು ಇಲ್ಲಿ ಅಂಟಿಸಿ..."
+                                else "Paste Nudi, Baraha, or Modern Universal Kannada text here..."
                             )
                         },
                         minLines = 5,
@@ -327,11 +328,17 @@ fun ConverterScreen(
                                 selected = selectedOutputFormat == targetFormat,
                                 onClick = { selectedOutputFormat = targetFormat },
                                 label = {
-                                    Text(if (knOnly) targetFormat.labelKn else targetFormat.labelEn)
+                                    Text(targetFormat.bilingualTitle)
                                 }
                             )
                         }
                     }
+
+                    Text(
+                        text = selectedOutputFormat.bilingualSubtitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
 
                     OutlinedTextField(
                         value = outputText,
@@ -349,6 +356,19 @@ fun ConverterScreen(
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
+            }
+
+            Surface(
+                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+                shape = MaterialTheme.shapes.medium,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = DefaultSaveFormat.KADATA_ALL_FORMATS_NOTE_BILINGUAL,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier.padding(12.dp)
+                )
             }
         }
     }

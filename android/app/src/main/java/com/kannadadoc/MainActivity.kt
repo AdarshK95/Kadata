@@ -15,6 +15,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
@@ -119,9 +120,10 @@ class MainActivity : ComponentActivity() {
         setContent {
             val userSettings by app.preferences.settings.collectAsState()
             val documentFormatMap by app.preferences.documentFormatMap.collectAsState()
+            val isDarkTheme = userSettings.resolveDarkTheme(isSystemInDarkTheme())
 
             SideEffect {
-                val isDark = userSettings.isDarkTheme
+                val isDark = isDarkTheme
                 enableEdgeToEdge(
                     statusBarStyle = if (isDark) {
                         SystemBarStyle.dark(AndroidColor.TRANSPARENT)
@@ -143,7 +145,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            KannadaDocTheme(darkTheme = userSettings.isDarkTheme) {
+            KannadaDocTheme(darkTheme = isDarkTheme) {
                 val recentFiles by homeViewModel.recentFiles.collectAsState()
                 val selectedFilter by homeViewModel.selectedFilter.collectAsState()
                 val homeUiState by homeViewModel.uiState.collectAsState()

@@ -16,6 +16,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -47,6 +48,7 @@ import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FindReplace
 import androidx.compose.material.icons.filled.FormatAlignCenter
 import androidx.compose.material.icons.filled.FormatBold
@@ -113,6 +115,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -125,6 +128,8 @@ import com.kannadadoc.data.local.AppThemeMode
 import com.kannadadoc.data.local.DefaultSaveFormat
 import com.kannadadoc.data.local.UserSettings
 import com.kannadadoc.export.ShareHelper
+import com.kannadadoc.ui.common.AboutKadataDialog
+import com.kannadadoc.ui.common.TwoStepFormatExportDialog
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONObject
@@ -150,6 +155,7 @@ fun EditorScreen(
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val knOnly = userSettings.isKannadaUi
+    val isDarkTheme = userSettings.resolveDarkTheme(isSystemInDarkTheme())
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var isWebReady by remember { mutableStateOf(false) }
@@ -157,6 +163,9 @@ fun EditorScreen(
     var showOverflowMenu by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showDocInfoDialog by remember { mutableStateOf(false) }
+    var showAboutDialog by remember { mutableStateOf(false) }
+    var showRenameDialog by remember { mutableStateOf(false) }
+    var renameDraftText by remember { mutableStateOf("") }
     var showChangeDocTypeDialog by remember { mutableStateOf(false) }
     var pendingConvertTarget by remember { mutableStateOf<KannadaEncodingChoice?>(null) }
     var showKannadaKeyboard by remember { mutableStateOf(false) }
@@ -172,7 +181,7 @@ fun EditorScreen(
     // Find & Replace UI state
     var showFindBar by remember { mutableStateOf(false) }
     val findFocusRequester = remember { FocusRequester() }
-    var showReplaceRow by remember { mutableStateOf(true) }
+    var showReplaceRow by remember { mutableStateOf(false) }
     var findQuery by remember { mutableStateOf("") }
     var replaceQuery by remember { mutableStateOf("") }
     var currentMatchIdx by remember { mutableIntStateOf(0) }
@@ -214,10 +223,10 @@ fun EditorScreen(
     }
 
     // Sync Light/Dark theme to the WebView canvas
-    LaunchedEffect(isWebReady, userSettings.isDarkTheme) {
+    LaunchedEffect(isWebReady, isDarkTheme) {
         if (isWebReady) {
             webViewRef?.evaluateJavascript(
-                "window.KannadaDocEditor && window.KannadaDocEditor.setDarkTheme(${userSettings.isDarkTheme});",
+                "window.KannadaDocEditor && window.KannadaDocEditor.setDarkTheme($isDarkTheme);",
                 null
             )
         }
@@ -277,7 +286,7 @@ fun EditorScreen(
             val jsConvArg = JSONObject.quote(uiState.activeConverter)
             val jsDraftArg = JSONObject.quote(uiState.savedDraftHtml ?: "")
             webViewRef?.evaluateJavascript(
-                "window.KannadaDocEditor.setDarkTheme(${userSettings.isDarkTheme});" +
+                "window.KannadaDocEditor.setDarkTheme($isDarkTheme);" +
                     "window.KannadaDocEditor.setManualKeyboardBlock(${userSettings.blockAutoKeyboard});" +
                     "window.KannadaDocEditor.setFontSize(${uiState.fontSizePt});" +
                     "window.KannadaDocEditor.loadDocument($jsDocArg, $jsConvArg, $jsDraftArg);",
@@ -292,14 +301,15 @@ fun EditorScreen(
 
     fun closeFindBar() {
         showFindBar = false
+        showReplaceRow = false
         findQuery = ""
         currentMatchIdx = 0
         totalMatches = 0
         execJs("window.KannadaDocEditor && window.KannadaDocEditor.clearSearch();")
     }
 
-    val savedGreen = if (userSettings.isDarkTheme) Color(0xFF66BB6A) else Color(0xFF2E7D32)
-    val unsavedGrey = if (userSettings.isDarkTheme) Color(0xFF8E968E) else Color(0xFF9E9E9E)
+    val savedGreen = if (isDarkTheme) Color(0xFF66BB6A) else Color(0xFF2E7D32)
+    val unsavedGrey = if (isDarkTheme) Color(0xFF8E968E) else Color(0xFF9E9E9E)
 
     Scaffold(
         topBar = {
@@ -332,16 +342,35 @@ fun EditorScreen(
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", modifier = Modifier.size(22.dp))
                     }
 
-                    Text(
-                        text = uiState.documentTitle.ifBlank { "Untitled" },
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
+                    Row(
                         modifier = Modifier
                             .weight(1f)
-                            .padding(horizontal = 4.dp)
-                    )
+                            .padding(horizontal = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = uiState.documentTitle.ifBlank { "Untitled" },
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                        IconButton(
+                            onClick = {
+                                renameDraftText = uiState.documentTitle.ifBlank { "Untitled.docx" }
+                                showRenameDialog = true
+                            },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Edit,
+                                contentDescription = if (knOnly) "ಹೆಸರು ಬದಲಿಸಿ" else "Rename file",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(17.dp)
+                            )
+                        }
+                    }
                     // Icon-only Save button (green when saved/clean, grey when edited/dirty)
                     // + green tick mark shown for 2.5 seconds after manual or auto-save
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -380,7 +409,7 @@ fun EditorScreen(
                         DropdownMenu(
                             expanded = showOverflowMenu,
                             onDismissRequest = { showOverflowMenu = false },
-                            containerColor = if (userSettings.isDarkTheme) Color.Black else MaterialTheme.colorScheme.surface
+                            containerColor = if (isDarkTheme) Color.Black else MaterialTheme.colorScheme.surface
                         ) {
                             DropdownMenuItem(
                                 text = {
@@ -390,7 +419,7 @@ fun EditorScreen(
                                 onClick = {
                                     showOverflowMenu = false
                                     showFindBar = true
-                                    showReplaceRow = true
+                                    showReplaceRow = false
                                 }
                             )
                             HorizontalDivider()
@@ -494,6 +523,14 @@ fun EditorScreen(
                                     webViewRef?.let { wv ->
                                         ShareHelper.printWebView(context, wv, uiState.documentTitle)
                                     }
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(if (knOnly) "ಆಪ್ ಬಗ್ಗೆ" else "About App • ಆಪ್ ಬಗ್ಗೆ") },
+                                leadingIcon = { Icon(Icons.Default.Info, null) },
+                                onClick = {
+                                    showOverflowMenu = false
+                                    showAboutDialog = true
                                 }
                             )
                             HorizontalDivider()
@@ -614,7 +651,7 @@ fun EditorScreen(
                                 closeFindBar()
                             } else {
                                 showFindBar = true
-                                showReplaceRow = true
+                                showReplaceRow = false
                             }
                         }
                         FormatButton("Undo", Icons.AutoMirrored.Filled.Undo) {
@@ -981,101 +1018,72 @@ fun EditorScreen(
         }
     }
 
-    // Two-Step Dialog for "Save a Copy" and "Share Different Format"
-    // Step 1: Select Kannada Encoding (Nudi / Baraha / Modern Unicode)
-    // Step 2: Select File Format (.doc / .docx / .pdf)
+    // Two-Step Dialog for "Save a Copy" and "Share Different Format" (shared bilingual format cards)
     pendingExportAction?.let { action ->
-        val actionTitle = when (action) {
-            ExportAction.SHARE_DIFFERENT -> if (knOnly) "ಬೇರೆ ಫಾರ್ಮ್ಯಾಟ್ ಹಂಚಿಕೊಳ್ಳಿ" else "Share Different Format"
-            ExportAction.SAVE_COPY -> if (knOnly) "ಪ್ರತಿ ಉಳಿಸಿ" else "Save a Copy"
-        }
+        TwoStepFormatExportDialog(
+            action = action,
+            chosenEncoding = chosenEncoding,
+            knOnly = knOnly,
+            onSelectEncoding = { chosenEncoding = it },
+            onBackToEncoding = { chosenEncoding = null },
+            onSelectFileType = { selectedEnc, fileType ->
+                val prefix = if (action == ExportAction.SHARE_DIFFERENT) "share" else "savecopy"
+                val mode = "${prefix}_${selectedEnc.id}_${fileType.id}"
+                chosenEncoding = null
+                pendingExportAction = null
+                execJs("window.KannadaDocEditor.requestExport('$mode', false);")
+            },
+            onDismiss = {
+                chosenEncoding = null
+                pendingExportAction = null
+            }
+        )
+    }
 
-        if (chosenEncoding == null) {
-            // Step 1: Kannada Encoding Picker
-            AlertDialog(
-                onDismissRequest = { pendingExportAction = null },
-                title = { Text(actionTitle) },
-                text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text(
-                            text = if (knOnly) "ಹಂತ 1/2: ಕನ್ನಡ ಫಾರ್ಮ್ಯಾಟ್ ಆಯ್ಕೆಮಾಡಿ"
-                            else "Step 1 of 2: Choose Kannada format",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        KannadaEncodingChoice.entries.forEach { enc ->
-                            OutlinedButton(
-                                onClick = { chosenEncoding = enc },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(52.dp)
-                            ) {
-                                Text(
-                                    text = if (knOnly) enc.labelKn else "${enc.labelEn} • ${enc.labelKn}",
-                                    style = MaterialTheme.typography.titleMedium
-                                )
-                            }
-                        }
-                    }
-                },
-                confirmButton = {},
-                dismissButton = {
-                    TextButton(onClick = { pendingExportAction = null }) {
-                        Text(if (knOnly) "ರದ್ದು" else "Cancel")
-                    }
-                }
-            )
-        } else {
-            // Step 2: File Format Picker (.doc / .docx / .pdf)
-            val selectedEnc = chosenEncoding!!
-            AlertDialog(
-                onDismissRequest = {
-                    chosenEncoding = null
-                    pendingExportAction = null
-                },
-                title = { Text("$actionTitle (${selectedEnc.labelEn})") },
-                text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text(
-                            text = if (knOnly) "ಹಂತ 2/2: ಫೈಲ್ ಪ್ರಕಾರ ಆಯ್ಕೆಮಾಡಿ"
-                            else "Step 2 of 2: Choose file type",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        TargetFileType.entries.forEach { fileType ->
-                            Button(
-                                onClick = {
-                                    val prefix = if (action == ExportAction.SHARE_DIFFERENT) "share" else "savecopy"
-                                    val mode = "${prefix}_${selectedEnc.id}_${fileType.id}"
-                                    chosenEncoding = null
-                                    pendingExportAction = null
-                                    execJs("window.KannadaDocEditor.requestExport('$mode', false);")
-                                },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(52.dp)
-                            ) {
-                                Text(fileType.label, style = MaterialTheme.typography.titleMedium)
-                            }
-                        }
-                    }
-                },
-                confirmButton = {},
-                dismissButton = {
-                    Row {
-                        TextButton(onClick = { chosenEncoding = null }) {
-                            Text(if (knOnly) "ಹಿಂದೆ" else "Back")
-                        }
-                        TextButton(onClick = {
-                            chosenEncoding = null
-                            pendingExportAction = null
-                        }) {
-                            Text(if (knOnly) "ರದ್ದು" else "Cancel")
-                        }
-                    }
-                }
-            )
+    // Rename Current File Dialog (triggered from the Edit icon next to filename in top bar)
+    if (showRenameDialog) {
+        val renameFocusRequester = remember { FocusRequester() }
+        LaunchedEffect(Unit) {
+            if (!userSettings.blockAutoKeyboard) {
+                delay(140)
+                runCatching { renameFocusRequester.requestFocus() }
+                softwareKeyboardController?.show()
+            }
         }
+        AlertDialog(
+            onDismissRequest = { showRenameDialog = false },
+            title = { Text(if (knOnly) "ಹೆಸರು ಬದಲಿಸಿ" else "Rename Document • ಹೆಸರು ಬದಲಿಸಿ") },
+            text = {
+                OutlinedTextField(
+                    value = renameDraftText,
+                    onValueChange = { renameDraftText = it },
+                    label = { Text(if (knOnly) "ಹೊಸ ಹೆಸರು" else "New Name • ಹೊಸ ಹೆಸರು") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusRequester(renameFocusRequester)
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val updated = renameDraftText.trim()
+                        if (updated.isNotEmpty()) {
+                            viewModel.renameCurrentDocument(updated)
+                        }
+                        showRenameDialog = false
+                    },
+                    enabled = renameDraftText.isNotBlank()
+                ) {
+                    Text(if (knOnly) "ಬದಲಿಸಿ" else "Rename")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRenameDialog = false }) {
+                    Text(if (knOnly) "ರದ್ದು" else "Cancel")
+                }
+            }
+        )
     }
 
     // Confirmation Dialog for Replace All (irreversible bulk mutation)
@@ -1123,11 +1131,61 @@ fun EditorScreen(
                     modifier = Modifier.verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
+                    Surface(
+                        onClick = {
+                            showSettingsDialog = false
+                            showAboutDialog = true
+                        },
+                        shape = MaterialTheme.shapes.medium,
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Info,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(22.dp)
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = if (knOnly) "ಆಪ್ ಬಗ್ಗೆ (ಕಡತ)" else "About App • ಆಪ್ ಬಗ್ಗೆ",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                                Text(
+                                    text = if (knOnly) "ಡೆವಲಪರ್: Adarsh Katagihallimath" else "Developer: Adarsh Katagihallimath",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
+                                )
+                            }
+                        }
+                    }
+
+                    HorizontalDivider()
+
                     Text(
-                        text = if (knOnly) "ಥೀಮ್ (ಬೆಳಕು / ಕತ್ತಲೆ)" else "Theme • ಥೀಮ್",
+                        text = if (knOnly) "ಥೀಮ್ (ಸಿಸ್ಟಮ್ / ಬೆಳಕು / ಕತ್ತಲೆ)" else "Theme • ಥೀಮ್",
                         style = MaterialTheme.typography.titleMedium
                     )
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        FilterChip(
+                            selected = userSettings.themeMode == AppThemeMode.SYSTEM,
+                            onClick = { onThemeModeChange(AppThemeMode.SYSTEM) },
+                            label = { Text(if (knOnly) "ಸಿಸ್ಟಮ್" else "System") }
+                        )
                         FilterChip(
                             selected = userSettings.themeMode == AppThemeMode.LIGHT,
                             onClick = { onThemeModeChange(AppThemeMode.LIGHT) },
@@ -1150,26 +1208,40 @@ fun EditorScreen(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable { onSaveFormatChange(format) },
-                            verticalAlignment = Alignment.CenterVertically
+                                .clickable { onSaveFormatChange(format) }
+                                .padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.Top
                         ) {
                             RadioButton(
                                 selected = userSettings.defaultSaveFormat == format,
                                 onClick = { onSaveFormatChange(format) }
                             )
-                            Spacer(Modifier.width(6.dp))
+                            Spacer(Modifier.width(4.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = if (knOnly) format.displayNameKn else format.displayName,
+                                    text = format.bilingualTitle,
                                     style = MaterialTheme.typography.bodyLarge
                                 )
                                 Text(
-                                    text = if (knOnly) format.subtitleKn else format.subtitle,
+                                    text = format.bilingualSubtitle,
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
                         }
+                    }
+
+                    Surface(
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+                        shape = MaterialTheme.shapes.small,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = DefaultSaveFormat.KADATA_ALL_FORMATS_NOTE_BILINGUAL,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.padding(10.dp)
+                        )
                     }
 
                     HorizontalDivider()
@@ -1251,6 +1323,7 @@ fun EditorScreen(
                     ) {
                         Text(if (knOnly) "ಡೀಫಾಲ್ಟ್ ಆಪ್ ಆಗಿ ಹೊಂದಿಸಿ" else "Set as Default App")
                     }
+
                 }
             },
             confirmButton = {
@@ -1261,19 +1334,21 @@ fun EditorScreen(
         )
     }
 
-    // Change Document Type Dialog (disables the format the document is already in)
+    // Change Document Type Dialog (disables the format the document is already in, bilingual + compatibility notes)
     if (showChangeDocTypeDialog) {
         val currentEnc = uiState.documentInfo.currentEncoding
         AlertDialog(
             onDismissRequest = { showChangeDocTypeDialog = false },
             title = {
-                Text(if (knOnly) "ದಾಖಲೆ ಫಾರ್ಮ್ಯಾಟ್ ಬದಲಿಸಿ" else "Change Document Type")
+                Text(if (knOnly) "ದಾಖಲೆ ಫಾರ್ಮ್ಯಾಟ್ ಬದಲಿಸಿ" else "Change Document Type • ದಾಖಲೆ ಫಾರ್ಮ್ಯಾಟ್ ಬದಲಿಸಿ")
             },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
                     Text(
-                        text = if (knOnly) "ಈ ದಾಖಲೆಯನ್ನು ಕೆಳಗಿನ ಯಾವ ಫಾರ್ಮ್ಯಾಟ್‌ಗೆ ಪರಿವರ್ತಿಸಬೇಕು?"
-                        else "Convert this document into another Kannada format:",
+                        text = "Convert this document into another Kannada format • ಈ ದಾಖಲೆಯನ್ನು ಬೇರೆ ಕನ್ನಡ ಫಾರ್ಮ್ಯಾಟ್‌ಗೆ ಪರಿವರ್ತಿಸಿ:",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1289,18 +1364,18 @@ fun EditorScreen(
                             enabled = !isAlreadyInFormat,
                             shape = MaterialTheme.shapes.medium,
                             color = if (isAlreadyInFormat) {
-                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
                             } else {
                                 MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
                             },
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Column(
-                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalArrangement = Arrangement.spacedBy(3.dp)
                             ) {
                                 Text(
-                                    text = if (knOnly) enc.labelKn else "${enc.labelEn} • ${enc.labelKn}",
+                                    text = enc.bilingualTitle,
                                     style = MaterialTheme.typography.titleMedium,
                                     color = if (isAlreadyInFormat) {
                                         MaterialTheme.colorScheme.onSurfaceVariant
@@ -1308,16 +1383,35 @@ fun EditorScreen(
                                         MaterialTheme.colorScheme.onSurface
                                     }
                                 )
+                                Text(
+                                    text = enc.bilingualSubtitle,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
                                 if (isAlreadyInFormat) {
                                     Text(
-                                        text = if (knOnly) "ದಾಖಲೆ ಈಗಾಗಲೇ ಈ ಫಾರ್ಮ್ಯಾಟ್‌ನಲ್ಲಿದೆ"
-                                        else "Document is already in this format",
-                                        style = MaterialTheme.typography.bodySmall,
+                                        text = "Document is already in this format • ದಾಖಲೆ ಈಗಾಗಲೇ ಈ ಫಾರ್ಮ್ಯಾಟ್‌ನಲ್ಲಿದೆ",
+                                        style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.primary
                                     )
                                 }
                             }
                         }
+                    }
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 2.dp))
+
+                    Surface(
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+                        shape = MaterialTheme.shapes.small,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = DefaultSaveFormat.KADATA_ALL_FORMATS_NOTE_BILINGUAL,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.padding(10.dp)
+                        )
                     }
                 }
             },
@@ -1384,7 +1478,7 @@ fun EditorScreen(
                     HorizontalDivider()
                     InfoRow(
                         if (knOnly) "ಉಳಿಸುವ ವಿಧಾನ" else "Default Save Format",
-                        if (knOnly) userSettings.defaultSaveFormat.displayNameKn else userSettings.defaultSaveFormat.displayName
+                        userSettings.defaultSaveFormat.bilingualTitle
                     )
                     InfoRow(
                         if (knOnly) "ಸ್ವಯಂ ಉಳಿಸುವ ಸಮಯ" else "Auto-Save Interval",
@@ -1397,6 +1491,13 @@ fun EditorScreen(
                     Text("OK")
                 }
             }
+        )
+    }
+
+    if (showAboutDialog) {
+        AboutKadataDialog(
+            knOnly = knOnly,
+            onDismiss = { showAboutDialog = false }
         )
     }
 }

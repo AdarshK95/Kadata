@@ -38,33 +38,36 @@ private val KadataLightColors = lightColorScheme(
     outline = Color(0xFFCBBCA0)
 )
 
-private val KadataDarkColors = darkColorScheme(
-    primary = Color(0xFF8ABCE6),
-    onPrimary = Color(0xFF07243D),
-    primaryContainer = Color(0xFF163D61),
-    onPrimaryContainer = Color(0xFFD8EAFB),
+/**
+ * True Pure Black (OLED) Dark Theme — zero bluish-grey tint on backgrounds,
+ * cards, menus, dialogs, or keyboard panels, paired with crisp Kadata accents.
+ */
+private val KadataPureBlackDarkColors = darkColorScheme(
+    primary = Color(0xFF7CB7EA),
+    onPrimary = Color(0xFF000000),
+    primaryContainer = Color(0xFF1A1A1A),
+    onPrimaryContainer = Color(0xFFE6F0FA),
     secondary = Color(0xFFE0B86A),
-    onSecondary = Color(0xFF352204),
-    secondaryContainer = Color(0xFF5A4012),
+    onSecondary = Color(0xFF000000),
+    secondaryContainer = Color(0xFF221C10),
     onSecondaryContainer = Color(0xFFF9E8C4),
-    tertiary = Color(0xFFA7C1D4),
-    onTertiary = Color(0xFF162733),
-    tertiaryContainer = Color(0xFF2B3F4F),
-    onTertiaryContainer = Color(0xFFDDEAF3),
-    background = Color(0xFF0F161E),
-    onBackground = Color(0xFFF1EDE4),
-    surface = Color(0xFF161F2A),
-    onSurface = Color(0xFFF1EDE4),
-    surfaceVariant = Color(0xFF222E3C),
-    onSurfaceVariant = Color(0xFFC2CCD6),
+    tertiary = Color(0xFFC4C4C4),
+    onTertiary = Color(0xFF000000),
+    tertiaryContainer = Color(0xFF1C1C1C),
+    onTertiaryContainer = Color(0xFFEAEAEA),
+    background = Color(0xFF000000),
+    onBackground = Color(0xFFF5F5F5),
+    surface = Color(0xFF080808),
+    onSurface = Color(0xFFF5F5F5),
+    surfaceVariant = Color(0xFF151515),
+    onSurfaceVariant = Color(0xFFB5B5B5),
     surfaceTint = Color.Transparent,
-    // Neutral black/dark-slate containers prevent any warm/reddish tonal tint on menus & dialogs
-    surfaceContainerLowest = Color(0xFF080A0D),
-    surfaceContainerLow = Color(0xFF0E1319),
-    surfaceContainer = Color(0xFF121820),
-    surfaceContainerHigh = Color(0xFF18202B),
-    surfaceContainerHighest = Color(0xFF1F2A38),
-    outline = Color(0xFF465566)
+    surfaceContainerLowest = Color(0xFF000000),
+    surfaceContainerLow = Color(0xFF060606),
+    surfaceContainer = Color(0xFF0C0C0C),
+    surfaceContainerHigh = Color(0xFF141414),
+    surfaceContainerHighest = Color(0xFF1E1E1E),
+    outline = Color(0xFF2E2E2E)
 )
 
 private val TabletTypography = Typography(
@@ -100,7 +103,7 @@ fun KannadaDocTheme(
     content: @Composable () -> Unit
 ) {
     MaterialTheme(
-        colorScheme = if (darkTheme) KadataDarkColors else KadataLightColors,
+        colorScheme = if (darkTheme) KadataPureBlackDarkColors else KadataLightColors,
         typography = TabletTypography,
         content = content
     )

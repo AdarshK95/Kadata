@@ -1,19 +1,26 @@
 package com.kannadadoc.ui.common
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.kannadadoc.data.local.DefaultSaveFormat
 import com.kannadadoc.ui.editor.ExportAction
 import com.kannadadoc.ui.editor.KannadaEncodingChoice
 import com.kannadadoc.ui.editor.TargetFileType
@@ -38,25 +45,55 @@ fun TwoStepFormatExportDialog(
             onDismissRequest = onDismiss,
             title = { Text(actionTitle) },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
                     Text(
-                        text = if (knOnly) "ಹಂತ 1/2: ಕನ್ನಡ ಫಾರ್ಮ್ಯಾಟ್ ಆಯ್ಕೆಮಾಡಿ"
-                        else "Step 1 of 2: Choose Kannada format",
+                        text = "Step 1 of 2: Choose Kannada format • ಹಂತ 1/2: ಕನ್ನಡ ಫಾರ್ಮ್ಯಾಟ್ ಆಯ್ಕೆಮಾಡಿ",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     KannadaEncodingChoice.entries.forEach { enc ->
-                        OutlinedButton(
+                        Surface(
                             onClick = { onSelectEncoding(enc) },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(50.dp)
+                            shape = MaterialTheme.shapes.medium,
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)),
+                            modifier = Modifier.fillMaxWidth()
                         ) {
-                            Text(
-                                text = if (knOnly) enc.labelKn else "${enc.labelEn} • ${enc.labelKn}",
-                                style = MaterialTheme.typography.titleMedium
-                            )
+                            Column(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalArrangement = Arrangement.spacedBy(3.dp)
+                            ) {
+                                Text(
+                                    text = enc.bilingualTitle,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = enc.bilingualSubtitle,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         }
+                    }
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 2.dp))
+
+                    Surface(
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+                        shape = MaterialTheme.shapes.small,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = DefaultSaveFormat.KADATA_ALL_FORMATS_NOTE_BILINGUAL,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.padding(10.dp)
+                        )
                     }
                 }
             },
@@ -70,7 +107,7 @@ fun TwoStepFormatExportDialog(
     } else {
         AlertDialog(
             onDismissRequest = onDismiss,
-            title = { Text("$actionTitle (${chosenEncoding.labelEn})") },
+            title = { Text("$actionTitle (${chosenEncoding.bilingualTitle})") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
