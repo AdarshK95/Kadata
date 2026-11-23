@@ -35,10 +35,19 @@ object FileLocationHelper {
      * resolves Downloads/MediaStore URIs (msf:/raw:/document:) into real folder paths, and
      * supports Samsung My Files (START_PATH + highlight) as well as Google/AOSP DocumentsUI.
      */
+    fun resolveParentDocumentUri(context: Context, uri: Uri, displayName: String = ""): Uri? {
+        if (uri.authority == "${context.packageName}.fileprovider") {
+            return DocumentsContract.buildDocumentUri(
+                "com.android.externalstorage.documents",
+                "primary:${Environment.DIRECTORY_DOCUMENTS}/${SafStorageManager.KADATA_PUBLIC_FOLDER}"
+            )
+        }
+        return resolveLocation(context, uri, displayName)?.parentDocUri
+    }
+
     fun openFileLocation(context: Context, entity: RecentFileEntity): FileLocationResult {
         val uri = Uri.parse(entity.uriString)
-        val isInternalAppCopy = entity.isLocallyImported ||
-            uri.authority == "${context.packageName}.fileprovider"
+        val isInternalAppCopy = uri.authority == "${context.packageName}.fileprovider"
 
         if (isInternalAppCopy) {
             return FileLocationResult.InfoMessage(

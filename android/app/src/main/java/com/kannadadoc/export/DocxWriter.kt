@@ -208,10 +208,5 @@ class DocxWriter {
         sb.append("</w:r>")
     }
 
-    private fun escapeXml(input: String): String =
-        input.replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace("\"", "&quot;")
-            .replace("'", "&apos;")
+    private fun escapeXml(input: String): String = XmlSanitizer.escapeXml(input)
 }

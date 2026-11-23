@@ -4,7 +4,6 @@ import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -79,6 +78,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -97,10 +98,16 @@ import com.kannadadoc.data.local.HomeViewMode
 import com.kannadadoc.data.local.RecentFileEntity
 import com.kannadadoc.data.local.UserSettings
 import com.kannadadoc.data.storage.FileLocationHelper
+import com.kannadadoc.data.storage.FileRenamePolicy
+import com.kannadadoc.data.storage.ImportSourcePolicy
 import com.kannadadoc.data.storage.FileLocationResult
-import com.kannadadoc.parser.DocumentRouter
 import com.kannadadoc.ui.common.AboutKadataDialog
+import com.kannadadoc.ui.common.CreateDocumentRequest
+import com.kannadadoc.ui.common.CreateDocumentWithMimeContract
 import com.kannadadoc.ui.common.FileTypeIcon
+import com.kannadadoc.ui.common.FrostedBackdropState
+import com.kannadadoc.ui.common.FrostedDocumentSurface
+import com.kannadadoc.ui.common.rememberFrostedBackdropState
 import com.kannadadoc.ui.common.TwoStepFormatExportDialog
 import com.kannadadoc.ui.editor.ExportAction
 import com.kannadadoc.ui.editor.KannadaEncodingChoice
@@ -128,7 +135,7 @@ fun HomeScreen(
         action: ExportAction,
         encoding: KannadaEncodingChoice,
         fileType: TargetFileType,
-        onRequestSafCreate: (String, String) -> Unit
+        onRequestSafCreate: (CreateDocumentRequest) -> Unit
     ) -> Unit,
     onWritePendingSafCopy: (Uri) -> Unit,
     onRenameRecentFile: (RecentFileEntity, String) -> Unit,
@@ -137,13 +144,13 @@ fun HomeScreen(
     onThemeModeChange: (AppThemeMode) -> Unit,
     onSaveFormatChange: (DefaultSaveFormat) -> Unit,
     onAutoSaveIntervalChange: (Int) -> Unit,
+    onBreakReminderChange: (Int) -> Unit,
     onBlockAutoKeyboardChange: (Boolean) -> Unit,
     onToggleViewMode: () -> Unit,
     onFontSizeChange: (Int) -> Unit,
     onShowInfo: (String) -> Unit,
     onErrorShown: () -> Unit,
-    onStatusShown: () -> Unit,
-    onDismissUnsupportedAlert: () -> Unit
+    onStatusShown: () -> Unit
 ) {
     val context = LocalContext.current
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -164,16 +171,9 @@ fun HomeScreen(
     var cardExportAction by remember { mutableStateOf<ExportAction?>(null) }
     var cardChosenEncoding by remember { mutableStateOf<KannadaEncodingChoice?>(null) }
 
-    val createDocxLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument(TargetFileType.DOCX.mimeType)
-    ) { uri -> uri?.let { onWritePendingSafCopy(it) } }
-
-    val createDocLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument(TargetFileType.DOC.mimeType)
-    ) { uri -> uri?.let { onWritePendingSafCopy(it) } }
-
-    val createPdfLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument(TargetFileType.PDF.mimeType)
+    // Unified SAF CreateDocument launcher supporting all 9 export formats & MIME types
+    val createDocumentLauncher = rememberLauncherForActivityResult(
+        CreateDocumentWithMimeContract()
     ) { uri -> uri?.let { onWritePendingSafCopy(it) } }
 
     LaunchedEffect(uiState.errorMessage) {
@@ -195,8 +195,13 @@ fun HomeScreen(
     val isTabletSplitHome = configuration.screenWidthDp >= 600 && isLandscape
     val blurredBgRes = if (isLandscape) R.drawable.kadata_bg_tablet_blur else R.drawable.kadata_bg_mobile_blur
     val isDarkTheme = userSettings.resolveDarkTheme(isSystemInDarkTheme())
+    val frostedBackdropState = rememberFrostedBackdropState(
+        context = context,
+        drawableRes = blurredBgRes,
+        enabled = isDarkTheme
+    )
     val bgScrimColor = if (isDarkTheme) {
-        Color(0xD6000000) // Pure black scrim in OLED dark mode (zero blue tint)
+        Color(0xB8000000) // Deep pure-black backdrop scrim so 60%-opaque frosted glass cards lift cleanly off the canvas
     } else {
         Color(0x88FAF3E3)
     }
@@ -237,6 +242,11 @@ fun HomeScreen(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxHeight()
+                .onGloballyPositioned { coords ->
+                    if (isDarkTheme) {
+                        frostedBackdropState.workspaceBoundsInWindow = coords.boundsInWindow()
+                    }
+                }
         ) {
             Image(
                 painter = painterResource(id = blurredBgRes),
@@ -452,7 +462,7 @@ fun HomeScreen(
                         val isWideTable = maxWidth >= 520.dp
                         Column(modifier = Modifier.fillMaxSize()) {
                             if (isWideTable) {
-                                DetailsListColumnHeader(knOnly = knOnly)
+                                DetailsListColumnHeader(knOnly = knOnly, isDarkTheme = isDarkTheme, backdropState = frostedBackdropState)
                             }
                             LazyColumn(
                                 verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -465,12 +475,15 @@ fun HomeScreen(
                                 modifier = Modifier.fillMaxSize()
                             ) {
                                 listItems(recentFiles, key = { it.uriString }) { file ->
+                                    val canRenameFile = FileRenamePolicy.isKadataOwnedRenamableUri(file.uriString, context.packageName)
                                     RecentFileDetailsRow(
                                         entity = file,
+                                        canRename = canRenameFile,
                                         kannadaFormatTag = resolveDisplayFormatTag(file, documentFormatMap),
                                         isWideTable = isWideTable,
                                         knOnly = knOnly,
                                         isDarkTheme = isDarkTheme,
+                                        backdropState = frostedBackdropState,
                                         onClick = { onRecentFileClick(file) },
                                         onOpenLocationClick = {
                                             when (val res = FileLocationHelper.openFileLocation(context, file)) {
@@ -509,12 +522,15 @@ fun HomeScreen(
                         contentPadding = PaddingValues(start = 14.dp, end = 14.dp, bottom = 20.dp)
                     ) {
                         items(recentFiles, key = { it.uriString }) { file ->
+                            val canRenameFile = FileRenamePolicy.isKadataOwnedRenamableUri(file.uriString, context.packageName)
                             RecentFileCard(
                                 entity = file,
+                                canRename = canRenameFile,
                                 kannadaFormatTag = resolveDisplayFormatTag(file, documentFormatMap),
                                 isDetailsMode = false,
                                 knOnly = knOnly,
                                 isDarkTheme = isDarkTheme,
+                                backdropState = frostedBackdropState,
                                 onClick = { onRecentFileClick(file) },
                                 onOpenLocationClick = {
                                     when (val res = FileLocationHelper.openFileLocation(context, file)) {
@@ -549,31 +565,6 @@ fun HomeScreen(
         }
     }
 
-    // Unsupported File Format Dialog (e.g. PPT, PPTX, XLSX, PNG)
-    uiState.unsupportedFormatName?.let { badFormat ->
-        AlertDialog(
-            onDismissRequest = onDismissUnsupportedAlert,
-            title = {
-                Text(if (knOnly) "ಬೆಂಬಲಿತವಲ್ಲದ ಫೈಲ್" else "Unsupported File Format")
-            },
-            text = {
-                Text(
-                    text = if (knOnly) {
-                        "ಈ $badFormat ಫಾರ್ಮ್ಯಾಟ್ ಬೆಂಬಲಿತವಾಗಿಲ್ಲ.\n\nಬೆಂಬಲಿತ ಫಾರ್ಮ್ಯಾಟ್‌ಗಳು: ${DocumentRouter.SUPPORTED_FORMATS_LABEL}"
-                    } else {
-                        "This $badFormat format is not supported.\n\nSupported formats: ${DocumentRouter.SUPPORTED_FORMATS_LABEL}"
-                    },
-                    style = MaterialTheme.typography.bodyLarge
-                )
-            },
-            confirmButton = {
-                Button(onClick = onDismissUnsupportedAlert) {
-                    Text("OK")
-                }
-            }
-        )
-    }
-
     // Two-Step Format Dialog for Home Card "Share Different Format" & "Save As"
     if (cardExportTarget != null && cardExportAction != null) {
         val target = cardExportTarget!!
@@ -588,12 +579,8 @@ fun HomeScreen(
                 cardExportTarget = null
                 cardExportAction = null
                 cardChosenEncoding = null
-                onExportRecentFile(target, action, enc, fileType) { suggested, mime ->
-                    when (mime) {
-                        TargetFileType.DOC.mimeType -> createDocLauncher.launch(suggested)
-                        TargetFileType.PDF.mimeType -> createPdfLauncher.launch(suggested)
-                        else -> createDocxLauncher.launch(suggested)
-                    }
+                onExportRecentFile(target, action, enc, fileType) { req ->
+                    createDocumentLauncher.launch(req)
                 }
             },
             onDismiss = {
@@ -638,7 +625,7 @@ fun HomeScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showNewDocDialog = false }) {
-                    Text(if (knOnly) "ರದ್ದು" else "Cancel")
+                    Text(if (knOnly) "ರದ್ದು" else "Cancel • ರದ್ದು")
                 }
             }
         )
@@ -679,30 +666,28 @@ fun HomeScreen(
                     },
                     enabled = renameText.isNotBlank()
                 ) {
-                    Text(if (knOnly) "ಬದಲಿಸಿ" else "Rename")
+                    Text(if (knOnly) "ಬದಲಿಸಿ" else "Rename • ಬದಲಿಸಿ")
                 }
             },
             dismissButton = {
                 TextButton(onClick = { filePendingRename = null }) {
-                    Text(if (knOnly) "ರದ್ದು" else "Cancel")
+                    Text(if (knOnly) "ರದ್ದು" else "Cancel • ರದ್ದು")
                 }
             }
         )
     }
 
-    // Delete Confirmation Dialog
+    // Remove from List Confirmation Dialog (leaves original file untouched on disk)
     filePendingDelete?.let { target ->
         AlertDialog(
             onDismissRequest = { filePendingDelete = null },
-            title = { Text(if (knOnly) "ಫೈಲ್ ತೆಗೆದುಹಾಕಬೇಕೇ?" else "Delete Document? • ತೆಗೆದುಹಾಕಬೇಕೇ?") },
+            title = { Text(if (knOnly) "ಪಟ್ಟಿಯಿಂದ ತೆಗೆದುಹಾಕಬೇಕೇ?" else "Remove from List? • ಪಟ್ಟಿಯಿಂದ ತೆಗೆದುಹಾಕಬೇಕೇ?") },
             text = {
+                val knText = "\"${target.displayName}\" ಅನ್ನು ಕಡತ ಪಟ್ಟಿಯಿಂದ ತೆಗೆದುಹಾಕಬೇಕೇ? ನಿಮ್ಮ ಮೂಲ ಫೈಲ್ ಸ್ಟೋರೇಜ್‌ನಲ್ಲಿ ಸುರಕ್ಷಿತವಾಗಿ ಉಳಿಯುತ್ತದೆ."
+                val enText = "Remove \"${target.displayName}\" from Kadata's list? Your original file stays untouched in storage."
                 Text(
-                    text = if (knOnly) {
-                        "\"${target.displayName}\" ಅನ್ನು ಇತ್ತೀಚಿನ ಫೈಲ್‌ಗಳ ಪಟ್ಟಿಯಿಂದ ಮತ್ತು ಡ್ರಾಫ್ಟ್‌ಗಳಿಂದ ತೆಗೆದುಹಾಕಲಾಗುತ್ತದೆ."
-                    } else {
-                        "Remove \"${target.displayName}\" from recent files and clear its unsaved draft? This cannot be undone."
-                    },
-                    style = MaterialTheme.typography.bodyLarge
+                    text = if (knOnly) knText else "$enText\n\n$knText",
+                    style = MaterialTheme.typography.bodyMedium
                 )
             },
             confirmButton = {
@@ -710,18 +695,14 @@ fun HomeScreen(
                     onClick = {
                         onDeleteRecentFile(target.uriString)
                         filePendingDelete = null
-                    },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.error,
-                        contentColor = MaterialTheme.colorScheme.onError
-                    )
+                    }
                 ) {
-                    Text(if (knOnly) "ತೆಗೆದುಹಾಕಿ" else "Delete")
+                    Text(if (knOnly) "ತೆಗೆದುಹಾಕಿ" else "Remove • ತೆಗೆದುಹಾಕಿ")
                 }
             },
             dismissButton = {
                 TextButton(onClick = { filePendingDelete = null }) {
-                    Text(if (knOnly) "ರದ್ದು" else "Cancel")
+                    Text(if (knOnly) "ರದ್ದು" else "Cancel • ರದ್ದು")
                 }
             }
         )
@@ -877,6 +858,42 @@ fun HomeScreen(
 
                     HorizontalDivider()
 
+                    Text(
+                        text = if (knOnly) {
+                            if (userSettings.breakReminderMinutes == 0) "ಆರೋಗ್ಯ ವಿರಾಮ ಸೂಚನೆ: ಆಫ್"
+                            else "ಆರೋಗ್ಯ ವಿರಾಮ ಸೂಚನೆ: ${userSettings.breakReminderMinutes} ನಿಮಿಷ"
+                        } else {
+                            if (userSettings.breakReminderMinutes == 0) "Wellness Break Reminder: Off"
+                            else "Wellness Break Reminder: ${userSettings.breakReminderMinutes} min"
+                        },
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        AppPreferences.BREAK_REMINDER_OPTIONS_MINUTES.forEach { mins ->
+                            FilterChip(
+                                selected = userSettings.breakReminderMinutes == mins,
+                                onClick = { onBreakReminderChange(mins) },
+                                label = {
+                                    Text(
+                                        when {
+                                            mins == 0 && knOnly -> "ಆಫ್"
+                                            mins == 0 -> "Off"
+                                            knOnly -> "$mins ನಿ"
+                                            else -> "${mins}m"
+                                        }
+                                    )
+                                }
+                            )
+                        }
+                    }
+
+                    HorizontalDivider()
+
                     Column {
                         Text(
                             text = if (knOnly) {
@@ -930,7 +947,7 @@ fun HomeScreen(
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text(if (knOnly) "ಡೀಫಾಲ್ಟ್ ಆಪ್ ಆಗಿ ಹೊಂದಿಸಿ" else "Set as Default App")
+                        Text(if (knOnly) "ಆಪ್ ಮಾಹಿತಿ" else "App Info")
                     }
 
                     Text(
@@ -1029,10 +1046,8 @@ private fun resolveDisplayFormatTag(
     entity: RecentFileEntity,
     formatMap: Map<String, String>
 ): String {
+    entity.kannadaFormat?.takeIf { it.isNotBlank() && it != "PDF" }?.let { return it }
     formatMap[entity.uriString]?.takeIf { it.isNotBlank() && it != "PDF" }?.let { return it }
-    entity.savedUnicodeUri?.let { saved ->
-        formatMap[saved]?.takeIf { it.isNotBlank() && it != "PDF" }?.let { return it }
-    }
     val name = entity.displayName
     return when {
         name.contains("_Nudi", ignoreCase = true) -> "Nudi"
@@ -1055,10 +1070,14 @@ private fun localizeFormatTag(rawTag: String, knOnly: Boolean): String =
     }
 
 @Composable
-private fun DetailsListColumnHeader(knOnly: Boolean) {
-    Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.85f),
-        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+private fun DetailsListColumnHeader(
+    knOnly: Boolean,
+    isDarkTheme: Boolean = false,
+    backdropState: FrostedBackdropState
+) {
+    FrostedDocumentSurface(
+        isDarkTheme = isDarkTheme,
+        backdropState = backdropState,
         shape = MaterialTheme.shapes.small,
         modifier = Modifier
             .fillMaxWidth()
@@ -1067,7 +1086,7 @@ private fun DetailsListColumnHeader(knOnly: Boolean) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = 46.dp, end = 42.dp, top = 6.dp, bottom = 6.dp),
+                .padding(start = 54.dp, end = 42.dp, top = 6.dp, bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
@@ -1102,10 +1121,10 @@ private fun DetailsListColumnHeader(knOnly: Boolean) {
                 modifier = Modifier.width(126.dp)
             )
             Text(
-                text = if (knOnly) "ಸ್ಥಿತಿ" else "Status",
+                text = if (knOnly) "ಮೂಲ" else "Source",
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.width(54.dp)
+                modifier = Modifier.width(86.dp)
             )
         }
     }
@@ -1114,10 +1133,12 @@ private fun DetailsListColumnHeader(knOnly: Boolean) {
 @Composable
 private fun RecentFileDetailsRow(
     entity: RecentFileEntity,
+    canRename: Boolean,
     kannadaFormatTag: String,
     isWideTable: Boolean,
     knOnly: Boolean,
     isDarkTheme: Boolean,
+    backdropState: FrostedBackdropState,
     onClick: () -> Unit,
     onOpenLocationClick: () -> Unit,
     onShareAsIsClick: () -> Unit,
@@ -1126,26 +1147,26 @@ private fun RecentFileDetailsRow(
     onRenameClick: () -> Unit,
     onDeleteClick: () -> Unit
 ) {
-    val dateLabel = remember(entity.lastOpenedAt) {
+    val dateLabel = remember(entity.lastModifiedAt) {
         SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault())
-            .format(Date(entity.lastOpenedAt))
+            .format(Date(entity.lastModifiedAt))
     }
     val sizeLabel = remember(entity.fileSizeBytes) { formatFileSizeLabel(entity.fileSizeBytes) }
     val formatLabel = localizeFormatTag(kannadaFormatTag, knOnly)
-    val statusLabel = when {
-        entity.savedUnicodeUri != null -> if (knOnly) "ತಿದ್ದುಪಡಿ" else "Edited"
-        entity.isLocallyImported -> if (knOnly) "ಆಫ್‌ಲೈನ್" else "Offline"
-        else -> "—"
-    }
+    val statusLabel = ImportSourcePolicy.resolveCardOriginLabel(
+        sourceAppLabel = entity.sourceAppLabel,
+        uriString = entity.uriString,
+        displayName = entity.displayName,
+        isEdited = entity.isEdited,
+        isLocallyImported = entity.isLocallyImported,
+        knOnly = knOnly
+    ) ?: "—"
 
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
-            contentColor = MaterialTheme.colorScheme.onSurface
-        )
+    FrostedDocumentSurface(
+        isDarkTheme = isDarkTheme,
+        backdropState = backdropState,
+        modifier = Modifier.fillMaxWidth(),
+        onClick = onClick
     ) {
         if (isWideTable) {
             // Single-line horizontal details table row maximizing horizontal real estate
@@ -1157,7 +1178,7 @@ private fun RecentFileDetailsRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 FileTypeIcon(
-                    format = entity.detectedFormat,
+                    format = entity.displayFormat,
                     isDarkTheme = isDarkTheme
                 )
                 Text(
@@ -1170,7 +1191,7 @@ private fun RecentFileDetailsRow(
                     modifier = Modifier.weight(1f)
                 )
                 Text(
-                    text = entity.detectedFormat.name,
+                    text = entity.displayFormat.name,
                     style = MaterialTheme.typography.bodySmall,
                     fontWeight = FontWeight.Medium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1207,16 +1228,18 @@ private fun RecentFileDetailsRow(
                 Text(
                     text = statusLabel,
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (entity.savedUnicodeUri != null) {
+                    color = if (entity.isEdited) {
                         MaterialTheme.colorScheme.primary
                     } else {
                         MaterialTheme.colorScheme.onSurfaceVariant
                     },
                     maxLines = 1,
                     softWrap = false,
-                    modifier = Modifier.width(54.dp)
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.width(86.dp)
                 )
                 FileCardOverflowMenu(
+                    canRename = canRename,
                     knOnly = knOnly,
                     isDarkTheme = isDarkTheme,
                     onOpenLocationClick = onOpenLocationClick,
@@ -1236,7 +1259,7 @@ private fun RecentFileDetailsRow(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 FileTypeIcon(
-                    format = entity.detectedFormat,
+                    format = entity.displayFormat,
                     isDarkTheme = isDarkTheme
                 )
                 Spacer(Modifier.width(10.dp))
@@ -1277,7 +1300,7 @@ private fun RecentFileDetailsRow(
                             softWrap = false
                         )
                         val rightMeta = listOfNotNull(
-                            entity.detectedFormat.name,
+                            entity.displayFormat.name,
                             formatLabel,
                             statusLabel.takeUnless { it == "—" }
                         ).joinToString(" • ")
@@ -1293,6 +1316,7 @@ private fun RecentFileDetailsRow(
                     }
                 }
                 FileCardOverflowMenu(
+                    canRename = canRename,
                     knOnly = knOnly,
                     isDarkTheme = isDarkTheme,
                     onOpenLocationClick = onOpenLocationClick,
@@ -1310,10 +1334,12 @@ private fun RecentFileDetailsRow(
 @Composable
 private fun RecentFileCard(
     entity: RecentFileEntity,
+    canRename: Boolean,
     kannadaFormatTag: String,
     isDetailsMode: Boolean,
     knOnly: Boolean,
     isDarkTheme: Boolean,
+    backdropState: FrostedBackdropState,
     onClick: () -> Unit,
     onOpenLocationClick: () -> Unit,
     onShareAsIsClick: () -> Unit,
@@ -1322,31 +1348,31 @@ private fun RecentFileCard(
     onRenameClick: () -> Unit,
     onDeleteClick: () -> Unit
 ) {
-    val dateLabel = remember(entity.lastOpenedAt) {
+    val dateLabel = remember(entity.lastModifiedAt) {
         SimpleDateFormat("dd MMM yyyy, hh:mm a", Locale.getDefault())
-            .format(Date(entity.lastOpenedAt))
+            .format(Date(entity.lastModifiedAt))
     }
     val sizeLabel = remember(entity.fileSizeBytes) { formatFileSizeLabel(entity.fileSizeBytes) }
 
-    val statusHint = when {
-        entity.savedUnicodeUri != null -> if (knOnly) "ತಿದ್ದುಪಡಿ" else "Edited"
-        entity.isLocallyImported -> if (knOnly) "ಆಫ್‌ಲೈನ್" else "Offline"
-        else -> null
-    }
+    val statusHint = ImportSourcePolicy.resolveCardOriginLabel(
+        sourceAppLabel = entity.sourceAppLabel,
+        uriString = entity.uriString,
+        displayName = entity.displayName,
+        isEdited = entity.isEdited,
+        isLocallyImported = entity.isLocallyImported,
+        knOnly = knOnly
+    )
 
     val localizedFormatTag = localizeFormatTag(kannadaFormatTag, knOnly)
 
     val line1Meta = "$dateLabel  •  $sizeLabel"
-    val line2Meta = listOfNotNull(entity.detectedFormat.name, localizedFormatTag, statusHint).joinToString("  •  ")
+    val line2Meta = listOfNotNull(entity.displayFormat.name, localizedFormatTag, statusHint).joinToString("  •  ")
 
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.93f),
-            contentColor = MaterialTheme.colorScheme.onSurface
-        )
+    FrostedDocumentSurface(
+        isDarkTheme = isDarkTheme,
+        backdropState = backdropState,
+        modifier = Modifier.fillMaxWidth(),
+        onClick = onClick
     ) {
         Row(
             modifier = Modifier.padding(
@@ -1358,7 +1384,7 @@ private fun RecentFileCard(
             verticalAlignment = Alignment.CenterVertically
         ) {
             FileTypeIcon(
-                format = entity.detectedFormat,
+                format = entity.displayFormat,
                 isDarkTheme = isDarkTheme
             )
             Spacer(Modifier.width(12.dp))
@@ -1392,6 +1418,7 @@ private fun RecentFileCard(
             }
 
             FileCardOverflowMenu(
+                canRename = canRename,
                 knOnly = knOnly,
                 isDarkTheme = isDarkTheme,
                 onOpenLocationClick = onOpenLocationClick,
@@ -1407,6 +1434,7 @@ private fun RecentFileCard(
 
 @Composable
 private fun FileCardOverflowMenu(
+    canRename: Boolean,
     knOnly: Boolean,
     isDarkTheme: Boolean,
     onOpenLocationClick: () -> Unit,
@@ -1474,26 +1502,28 @@ private fun FileCardOverflowMenu(
                 }
             )
             HorizontalDivider()
-            DropdownMenuItem(
-                text = { Text(if (knOnly) "ಹೆಸರು ಬದಲಿಸಿ" else "Rename") },
-                leadingIcon = { Icon(Icons.Default.Edit, null) },
-                onClick = {
-                    showCardMenu = false
-                    onRenameClick()
-                }
-            )
+            if (canRename) {
+                DropdownMenuItem(
+                    text = { Text(if (knOnly) "ಹೆಸರು ಬದಲಿಸಿ" else "Rename") },
+                    leadingIcon = { Icon(Icons.Default.Edit, null) },
+                    onClick = {
+                        showCardMenu = false
+                        onRenameClick()
+                    }
+                )
+            }
             DropdownMenuItem(
                 text = {
                     Text(
-                        text = if (knOnly) "ತೆಗೆದುಹಾಕಿ" else "Delete",
-                        color = MaterialTheme.colorScheme.error
+                        text = if (knOnly) "ಪಟ್ಟಿಯಿಂದ ತೆಗೆದುಹಾಕಿ" else "Remove from List",
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                 },
                 leadingIcon = {
                     Icon(
                         Icons.Default.DeleteOutline,
                         null,
-                        tint = MaterialTheme.colorScheme.error
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 },
                 onClick = {

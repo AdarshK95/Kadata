@@ -28,7 +28,8 @@ class RtfParser {
         var underline: Boolean = false,
         var fontSizePt: Float? = null,
         var alignment: String = "left",
-        var skipGroup: Boolean = false
+        var skipGroup: Boolean = false,
+        var unicodeSkipCount: Int = 1
     )
 
     fun parse(inputStream: InputStream, sourceUri: String, fileName: String): ParsedDocument {
@@ -209,6 +210,9 @@ class RtfParser {
                                         unicodeBuffer.append('\n')
                                     }
                                     "tab" -> textBuffer.write('\t'.code)
+                                    "uc" -> if (param != null && param >= 0) {
+                                        state.unicodeSkipCount = param
+                                    }
                                     "u" -> if (param != null) {
                                         if (textBuffer.size() > 0) {
                                             unicodeBuffer.append(String(textBuffer.toByteArray(), CP1252))
@@ -216,8 +220,31 @@ class RtfParser {
                                         }
                                         val codePoint = if (param < 0) param + 65536 else param
                                         unicodeBuffer.append(codePoint.toChar())
-                                        if (i < n && rtfText[i] != '\\' && rtfText[i] != '{' && rtfText[i] != '}') {
-                                            i++
+                                        var remainingSkips = state.unicodeSkipCount
+                                        while (remainingSkips > 0 && i < n) {
+                                            while (i < n && (rtfText[i] == '\r' || rtfText[i] == '\n')) i++
+                                            if (i >= n) break
+                                            val cur = rtfText[i]
+                                            if (cur == '{' || cur == '}') break
+                                            if (cur == '\\') {
+                                                if (i + 1 >= n) break
+                                                val escCh = rtfText[i + 1]
+                                                when {
+                                                    escCh == '\'' && i + 3 < n -> {
+                                                        i += 4
+                                                        remainingSkips--
+                                                    }
+                                                    escCh == '\\' || escCh == '{' || escCh == '}' ||
+                                                        escCh == '~' || escCh == '_' || escCh == '-' -> {
+                                                        i += 2
+                                                        remainingSkips--
+                                                    }
+                                                    else -> break // Do not consume a real control word (e.g. \u or \par)
+                                                }
+                                            } else {
+                                                i++
+                                                remainingSkips--
+                                            }
                                         }
                                     }
                                 }

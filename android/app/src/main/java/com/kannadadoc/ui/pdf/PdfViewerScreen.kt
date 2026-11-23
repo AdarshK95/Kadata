@@ -5,11 +5,15 @@ import android.graphics.Color as AndroidColor
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.ParcelFileDescriptor
+import android.util.LruCache
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -34,6 +38,8 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FitScreen
+import androidx.compose.material.icons.filled.ZoomIn
+import androidx.compose.material.icons.filled.ZoomOut
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalIconButton
@@ -52,10 +58,10 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -74,6 +80,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.kannadadoc.parser.DocBlock
 import com.kannadadoc.parser.DocFormat
 import com.kannadadoc.parser.DocumentParserFacade
 import com.kannadadoc.parser.ParsedDocument
@@ -90,7 +97,7 @@ fun PdfViewerScreen(
     uri: Uri,
     fileName: String,
     parserFacade: DocumentParserFacade,
-    bilingualLabels: Boolean,
+    knOnly: Boolean,
     onBack: () -> Unit,
     onOpenExtractedDocument: (ParsedDocument) -> Unit
 ) {
@@ -105,7 +112,18 @@ fun PdfViewerScreen(
     var isExtracting by remember { mutableStateOf(false) }
 
     val renderMutex = remember { Mutex() }
-    val bitmapCache = remember { mutableStateMapOf<Int, Bitmap>() }
+    // Memory-budgeted LRU bitmap cache: RGB_565 halves RAM usage per page and LruCache caps
+    // total native PDF page memory to 1/8 of max heap (16 MB - 64 MB) to prevent OOM on large books.
+    val bitmapCache = remember(uri) {
+        val maxKb = (Runtime.getRuntime().maxMemory() / 1024L / 8L)
+            .toInt()
+            .coerceIn(16 * 1024, 64 * 1024)
+        object : LruCache<Int, Bitmap>(maxKb) {
+            override fun sizeOf(key: Int, value: Bitmap): Int =
+                (value.allocationByteCount / 1024).coerceAtLeast(1)
+        }
+    }
+    var cacheVersion by remember { mutableIntStateOf(0) }
 
     // Zoom & pan state (reset automatically on page turn)
     var zoomScale by remember { mutableFloatStateOf(1f) }
@@ -131,7 +149,7 @@ fun PdfViewerScreen(
         onDispose {
             runCatching { renderer?.close() }
             runCatching { pfd?.close() }
-            bitmapCache.clear()
+            bitmapCache.evictAll()
         }
     }
 
@@ -208,7 +226,22 @@ fun PdfViewerScreen(
                                 isExtracting = false
                                 result
                                     .onSuccess { extracted ->
-                                        onOpenExtractedDocument(extracted)
+                                        val hasText = extracted.blocks.any { blk ->
+                                            when (blk) {
+                                                is DocBlock.Paragraph -> blk.runs.any { it.text.isNotBlank() }
+                                                is DocBlock.Table -> blk.rows.any { row ->
+                                                    row.any { cell -> cell.any { p -> p.runs.any { it.text.isNotBlank() } } }
+                                                }
+                                            }
+                                        }
+                                        val finalExtracted = if (!hasText && extracted.warningMessage.isNullOrBlank()) {
+                                            extracted.copy(
+                                                warningMessage = "No selectable text was found in this PDF (it appears to be a scanned image). You can still type notes in this blank document • ಈ PDF ನಲ್ಲಿ ಆಯ್ಕೆಮಾಡಬಹುದಾದ ಪಠ್ಯ ಕಂಡುಬಂದಿಲ್ಲ (ಇದು ಸ್ಕ್ಯಾನ್ ಮಾಡಿದ ಚಿತ್ರವಾಗಿರಬಹುದು)."
+                                            )
+                                        } else {
+                                            extracted
+                                        }
+                                        onOpenExtractedDocument(finalExtracted)
                                     }
                                     .onFailure { err ->
                                         snackbarHostState.showSnackbar(
@@ -236,7 +269,7 @@ fun PdfViewerScreen(
                         }
                         Spacer(Modifier.width(5.dp))
                         Text(
-                            text = if (bilingualLabels) "Edit" else "ತಿದ್ದುಪಡಿ",
+                            text = if (knOnly) "ತಿದ್ದುಪಡಿ" else "Edit",
                             fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold,
                             maxLines = 1,
@@ -262,56 +295,115 @@ fun PdfViewerScreen(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(54.dp)
-                                .padding(horizontal = 16.dp),
+                                .height(56.dp)
+                                .padding(horizontal = 10.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            FilledTonalIconButton(
-                                onClick = {
-                                    val prev = (pagerState.currentPage - 1).coerceAtLeast(0)
-                                    scope.launch { pagerState.animateScrollToPage(prev) }
-                                },
-                                enabled = pagerState.currentPage > 0,
-                                modifier = Modifier.size(40.dp)
+                            // Page Navigation (< Page X/Y >)
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
-                                Icon(
-                                    Icons.AutoMirrored.Filled.KeyboardArrowLeft,
-                                    contentDescription = "Previous page"
-                                )
-                            }
-
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text(
-                                    text = if (bilingualLabels) {
-                                        "Page ${pagerState.currentPage + 1} / $pageCount"
-                                    } else {
-                                        "ಪುಟ ${pagerState.currentPage + 1} / $pageCount"
+                                FilledTonalIconButton(
+                                    onClick = {
+                                        val prev = (pagerState.currentPage - 1).coerceAtLeast(0)
+                                        scope.launch { pagerState.animateScrollToPage(prev) }
                                     },
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.SemiBold
+                                    enabled = pagerState.currentPage > 0,
+                                    modifier = Modifier.size(36.dp)
+                                ) {
+                                    Icon(
+                                        Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                                        contentDescription = "Previous page",
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+
+                                Text(
+                                    text = if (knOnly) {
+                                        "${pagerState.currentPage + 1} / $pageCount"
+                                    } else {
+                                        "Page ${pagerState.currentPage + 1}/$pageCount"
+                                    },
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    modifier = Modifier.padding(horizontal = 4.dp)
                                 )
-                                if (zoomScale > 1.05f) {
-                                    Text(
-                                        text = "${(zoomScale * 100).roundToInt()}%",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.primary
+
+                                FilledTonalIconButton(
+                                    onClick = {
+                                        val next = (pagerState.currentPage + 1).coerceAtMost(pageCount - 1)
+                                        scope.launch { pagerState.animateScrollToPage(next) }
+                                    },
+                                    enabled = pagerState.currentPage < pageCount - 1,
+                                    modifier = Modifier.size(36.dp)
+                                ) {
+                                    Icon(
+                                        Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                        contentDescription = "Next page",
+                                        modifier = Modifier.size(20.dp)
                                     )
                                 }
                             }
 
-                            FilledTonalIconButton(
-                                onClick = {
-                                    val next = (pagerState.currentPage + 1).coerceAtMost(pageCount - 1)
-                                    scope.launch { pagerState.animateScrollToPage(next) }
-                                },
-                                enabled = pagerState.currentPage < pageCount - 1,
-                                modifier = Modifier.size(40.dp)
+                            // Always-Visible PDF Zoom Controls (- | 100% | +)
+                            Surface(
+                                shape = RoundedCornerShape(18.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.85f),
+                                border = BorderStroke(0.75.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
                             ) {
-                                Icon(
-                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                    contentDescription = "Next page"
-                                )
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 2.dp, vertical = 2.dp)
+                                ) {
+                                    IconButton(
+                                        onClick = {
+                                            val next = (zoomScale - 0.25f).coerceIn(1f, 4f)
+                                            zoomScale = next
+                                            if (next <= 1.02f) panOffset = Offset.Zero
+                                        },
+                                        enabled = zoomScale > 1.01f,
+                                        modifier = Modifier.size(34.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Default.ZoomOut,
+                                            contentDescription = "Zoom out",
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+
+                                    Text(
+                                        text = "${(zoomScale * 100).roundToInt()}%",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (zoomScale > 1.05f) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .clickable {
+                                                zoomScale = 1f
+                                                panOffset = Offset.Zero
+                                            }
+                                            .padding(horizontal = 6.dp, vertical = 4.dp)
+                                    )
+
+                                    IconButton(
+                                        onClick = {
+                                            zoomScale = (zoomScale + 0.25f).coerceIn(1f, 4f)
+                                        },
+                                        enabled = zoomScale < 3.99f,
+                                        modifier = Modifier.size(34.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Default.ZoomIn,
+                                            contentDescription = "Zoom in",
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -354,6 +446,8 @@ fun PdfViewerScreen(
                             renderer = renderer,
                             renderMutex = renderMutex,
                             bitmapCache = bitmapCache,
+                            cacheVersion = cacheVersion,
+                            onBitmapCached = { cacheVersion++ },
                             zoomScale = if (pagerState.currentPage == pageIndex) zoomScale else 1f,
                             panOffset = if (pagerState.currentPage == pageIndex) panOffset else Offset.Zero,
                             onTransformChange = { newScale, newOffset ->
@@ -373,22 +467,27 @@ private fun PdfZoomablePage(
     pageIndex: Int,
     renderer: PdfRenderer?,
     renderMutex: Mutex,
-    bitmapCache: MutableMap<Int, Bitmap>,
+    bitmapCache: LruCache<Int, Bitmap>,
+    cacheVersion: Int,
+    onBitmapCached: () -> Unit,
     zoomScale: Float,
     panOffset: Offset,
     onTransformChange: (Float, Offset) -> Unit
 ) {
     var containerSize by remember { mutableStateOf(IntSize.Zero) }
-    val cachedBitmap = bitmapCache[pageIndex]
+    var renderError by remember(pageIndex, renderer) { mutableStateOf<String?>(null) }
+    val cachedBitmap = remember(pageIndex, cacheVersion) { bitmapCache.get(pageIndex) }
 
     LaunchedEffect(pageIndex, renderer) {
-        if (renderer != null && bitmapCache[pageIndex] == null) {
-            val bmp = withContext(Dispatchers.IO) {
+        if (renderer != null && bitmapCache.get(pageIndex) == null) {
+            renderError = null
+            val renderResult = withContext(Dispatchers.IO) {
                 renderMutex.withLock {
                     runCatching {
                         renderer.openPage(pageIndex).use { page ->
-                            // Render crisp high-resolution bitmap (~2.2x PDF points, capped safely at 2200px)
-                            val targetScale = minOf(2.2f, 2200f / maxOf(page.width, page.height).coerceAtLeast(1))
+                            // PdfRenderer.Page.render() strictly requires ARGB_8888 on Android;
+                            // cap longest edge at 1600px (~7 MB/page) inside our heap-bounded LruCache.
+                            val targetScale = minOf(2.0f, 1600f / maxOf(page.width, page.height).coerceAtLeast(1))
                             val w = (page.width * targetScale).roundToInt().coerceAtLeast(1)
                             val h = (page.height * targetScale).roundToInt().coerceAtLeast(1)
                             val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
@@ -396,65 +495,98 @@ private fun PdfZoomablePage(
                             page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                             bitmap
                         }
-                    }.getOrNull()
+                    }
                 }
             }
-            if (bmp != null) {
-                // Keep memory bounded: keep only current +/- 3 pages cached
-                val keysToDrop = bitmapCache.keys.filter { kotlin.math.abs(it - pageIndex) > 3 }
-                keysToDrop.forEach { bitmapCache.remove(it) }
-                bitmapCache[pageIndex] = bmp
-            }
+            renderResult
+                .onSuccess { bmp ->
+                    bitmapCache.put(pageIndex, bmp)
+                    onBitmapCached()
+                }
+                .onFailure { err ->
+                    renderError = err.message ?: "Unable to render page ${pageIndex + 1}"
+                }
         }
     }
+
+    // Keep latest transform state via rememberUpdatedState so pointerInput(pageIndex) NEVER cancels mid-pinch!
+    val latestScale by rememberUpdatedState(zoomScale)
+    val latestOffset by rememberUpdatedState(panOffset)
+    val latestSize by rememberUpdatedState(containerSize)
+    val latestOnTransform by rememberUpdatedState(onTransformChange)
 
     Box(
         modifier = Modifier
             .fillMaxSize()
             .onSizeChanged { containerSize = it }
-            .pointerInput(zoomScale) {
+            .pointerInput(pageIndex) {
                 detectTapGestures(
-                    onDoubleTap = {
-                        if (zoomScale > 1.2f) {
-                            onTransformChange(1f, Offset.Zero)
+                    onDoubleTap = { tapPos ->
+                        if (latestScale > 1.2f) {
+                            latestOnTransform(1f, Offset.Zero)
                         } else {
-                            onTransformChange(2.2f, Offset.Zero)
+                            val targetScale = 2.25f
+                            val sz = latestSize
+                            val maxX = ((sz.width * (targetScale - 1f)) / 2f).coerceAtLeast(0f)
+                            val maxY = ((sz.height * (targetScale - 1f)) / 2f).coerceAtLeast(0f)
+                            val centerX = sz.width / 2f
+                            val centerY = sz.height / 2f
+                            val offsetX = ((centerX - tapPos.x) * (targetScale - 1f)).coerceIn(-maxX, maxX)
+                            val offsetY = ((centerY - tapPos.y) * (targetScale - 1f)).coerceIn(-maxY, maxY)
+                            latestOnTransform(targetScale, Offset(offsetX, offsetY))
                         }
                     }
                 )
             }
-            .pointerInput(zoomScale, panOffset, containerSize) {
-                // Custom multi-touch handler:
-                // - 2+ fingers ALWAYS pinch-to-zoom & pan cleanly
-                // - 1 finger pans ONLY when zoomed in (zoomScale > 1.05f)
-                // - 1 finger at 1x zoom is NOT consumed so HorizontalPager swipes effortlessly!
+            .pointerInput(pageIndex) {
+                // Stable multi-touch gesture handler (never restarts mid-pinch):
+                // - 2+ fingers ALWAYS perform focal-point pinch-to-zoom & pan cleanly
+                // - 1 finger pans smoothly when zoomed in (scale > 1.05f)
+                // - 1 finger at 1x zoom is NOT consumed so HorizontalPager swipes pages effortlessly!
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false)
-                    var curScale = zoomScale
-                    var curOffset = panOffset
+                    var curScale = latestScale
+                    var curOffset = latestOffset
+                    var gestureActive = false
                     do {
                         val event = awaitPointerEvent()
                         val pressedCount = event.changes.count { it.pressed }
-                        val zoomChange = event.calculateZoom()
-                        val panChange = event.calculatePan()
 
-                        if (pressedCount >= 2 || curScale > 1.05f) {
+                        if (pressedCount >= 2 || curScale > 1.05f || gestureActive) {
+                            val zoomChange = event.calculateZoom()
+                            val panChange = event.calculatePan()
+                            val centroid = event.calculateCentroid(useCurrent = true)
+                            val sz = latestSize
+
                             val nextScale = (curScale * zoomChange).coerceIn(1f, 4f)
-                            val maxX = ((containerSize.width * (nextScale - 1f)) / 2f).coerceAtLeast(0f)
-                            val maxY = ((containerSize.height * (nextScale - 1f)) / 2f).coerceAtLeast(0f)
+                            val maxX = ((sz.width * (nextScale - 1f)) / 2f).coerceAtLeast(0f)
+                            val maxY = ((sz.height * (nextScale - 1f)) / 2f).coerceAtLeast(0f)
+
                             val nextOffset = if (nextScale <= 1.02f) {
                                 Offset.Zero
                             } else {
+                                // Anchor pinch zoom around the user's fingers (focal-point zoom)
+                                val scaleRatio = if (curScale > 0f) nextScale / curScale else 1f
+                                val center = Offset(sz.width / 2f, sz.height / 2f)
+                                val focalDelta = if (centroid != Offset.Unspecified && pressedCount >= 2) {
+                                    (centroid - center - curOffset) * (1f - scaleRatio)
+                                } else {
+                                    Offset.Zero
+                                }
                                 Offset(
-                                    x = (curOffset.x + panChange.x).coerceIn(-maxX, maxX),
-                                    y = (curOffset.y + panChange.y).coerceIn(-maxY, maxY)
+                                    x = (curOffset.x + panChange.x + focalDelta.x).coerceIn(-maxX, maxX),
+                                    y = (curOffset.y + panChange.y + focalDelta.y).coerceIn(-maxY, maxY)
                                 )
                             }
+
+                            if (pressedCount >= 2) gestureActive = true
+
                             if (nextScale != curScale || nextOffset != curOffset) {
                                 curScale = nextScale
                                 curOffset = nextOffset
-                                onTransformChange(curScale, curOffset)
+                                latestOnTransform(curScale, curOffset)
                             }
+
                             if (pressedCount >= 2 || curScale > 1.05f) {
                                 event.changes.forEach { it.consume() }
                             }
@@ -481,6 +613,13 @@ private fun PdfZoomablePage(
                     .shadow(4.dp, RoundedCornerShape(6.dp))
                     .clip(RoundedCornerShape(6.dp))
                     .background(Color.White)
+            )
+        } else if (renderError != null) {
+            Text(
+                text = renderError!!,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(24.dp)
             )
         } else {
             CircularProgressIndicator()

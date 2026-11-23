@@ -18,6 +18,15 @@ data class RecentFileEntity(
     val fileSizeBytes: Long,
     val isLocallyImported: Boolean,
     val converterOverride: String? = null,
+    // Legacy v2/v3 column retained only for non-destructive schema compatibility;
+    // v0.21.0 promotes all legacy savedUnicodeUri entries into canonical uriString (1 Card = 1 File).
     val savedUnicodeUri: String? = null,
-    val lastOpenedAt: Long
-)
+    val kannadaFormat: String? = null,
+    val lastOpenedAt: Long,
+    val lastModifiedAt: Long = lastOpenedAt,
+    val isEdited: Boolean = false,
+    val sourceAppLabel: String? = null
+) {
+    val displayFormat: DocFormat
+        get() = DocFormat.displayFormatFor(displayName, detectedFormat)
+}

@@ -15,8 +15,8 @@ enum class AppThemeMode {
 }
 
 enum class AppLanguage {
-    ENGLISH, // Default: English with existing Kannada meanings preserved
-    KANNADA  // Full Kannada UI labels
+    ENGLISH,
+    KANNADA
 }
 
 enum class HomeViewMode {
@@ -78,8 +78,9 @@ data class UserSettings(
     val defaultFontSizePt: Int = 18,
     val defaultSaveFormat: DefaultSaveFormat = DefaultSaveFormat.NUDI_PC,
     val autoSaveIntervalMinutes: Int = 5,
+    val breakReminderMinutes: Int = 20,
     val blockAutoKeyboard: Boolean = false,
-    val homeViewMode: HomeViewMode = HomeViewMode.GRID
+    val homeViewMode: HomeViewMode = HomeViewMode.DETAILS_LIST
 ) {
     val isKannadaUi: Boolean get() = appLanguage == AppLanguage.KANNADA
 
@@ -102,22 +103,19 @@ class AppPreferences(context: Context) {
 
     private fun loadSettings(): UserSettings {
         val themeName = prefs.getString(KEY_THEME_MODE_V2, AppThemeMode.SYSTEM.name)
-        val theme = runCatching { AppThemeMode.valueOf(themeName ?: "") }
-            .getOrDefault(AppThemeMode.SYSTEM)
+        val theme = runCatching { AppThemeMode.valueOf(themeName ?: "") }.getOrDefault(AppThemeMode.SYSTEM)
 
         val langName = prefs.getString(KEY_APP_LANGUAGE, AppLanguage.ENGLISH.name)
-        val language = runCatching { AppLanguage.valueOf(langName ?: "") }
-            .getOrDefault(AppLanguage.ENGLISH)
+        val language = runCatching { AppLanguage.valueOf(langName ?: "") }.getOrDefault(AppLanguage.ENGLISH)
 
         val savedFormatName = prefs.getString(KEY_SAVE_FORMAT, DefaultSaveFormat.NUDI_PC.name)
-        val format = runCatching { DefaultSaveFormat.valueOf(savedFormatName ?: "") }
-            .getOrDefault(DefaultSaveFormat.NUDI_PC)
+        val format = runCatching { DefaultSaveFormat.valueOf(savedFormatName ?: "") }.getOrDefault(DefaultSaveFormat.NUDI_PC)
 
-        val viewModeName = prefs.getString(KEY_HOME_VIEW_MODE, HomeViewMode.GRID.name)
-        val viewMode = runCatching { HomeViewMode.valueOf(viewModeName ?: "") }
-            .getOrDefault(HomeViewMode.GRID)
+        val viewModeName = prefs.getString(KEY_HOME_VIEW_MODE, HomeViewMode.DETAILS_LIST.name)
+        val viewMode = runCatching { HomeViewMode.valueOf(viewModeName ?: "") }.getOrDefault(HomeViewMode.DETAILS_LIST)
 
         val autoSaveMin = prefs.getInt(KEY_AUTOSAVE_MINUTES, 5).coerceIn(1, 60)
+        val breakReminderMin = prefs.getInt(KEY_BREAK_REMINDER_MINUTES, 20).coerceIn(0, 120)
 
         return UserSettings(
             themeMode = theme,
@@ -125,6 +123,7 @@ class AppPreferences(context: Context) {
             defaultFontSizePt = prefs.getInt(KEY_FONT_SIZE, 18).coerceIn(14, 32),
             defaultSaveFormat = format,
             autoSaveIntervalMinutes = autoSaveMin,
+            breakReminderMinutes = breakReminderMin,
             blockAutoKeyboard = prefs.getBoolean(KEY_BLOCK_AUTO_KB, false),
             homeViewMode = viewMode
         )
@@ -133,9 +132,7 @@ class AppPreferences(context: Context) {
     private fun loadFormatMap(): Map<String, String> {
         val result = mutableMapOf<String, String>()
         for ((k, v) in formatPrefs.all) {
-            if (v is String && v.isNotBlank()) {
-                result[k] = v
-            }
+            if (v is String && v.isNotBlank()) result[k] = v
         }
         return result
     }
@@ -162,11 +159,7 @@ class AppPreferences(context: Context) {
     }
 
     fun toggleLanguage() {
-        val next = if (_settings.value.appLanguage == AppLanguage.ENGLISH) {
-            AppLanguage.KANNADA
-        } else {
-            AppLanguage.ENGLISH
-        }
+        val next = if (_settings.value.appLanguage == AppLanguage.ENGLISH) AppLanguage.KANNADA else AppLanguage.ENGLISH
         setAppLanguage(next)
     }
 
@@ -192,17 +185,19 @@ class AppPreferences(context: Context) {
         _settings.value = _settings.value.copy(autoSaveIntervalMinutes = clamped)
     }
 
+    fun setBreakReminderMinutes(minutes: Int) {
+        val clamped = minutes.coerceIn(0, 120)
+        prefs.edit().putInt(KEY_BREAK_REMINDER_MINUTES, clamped).apply()
+        _settings.value = _settings.value.copy(breakReminderMinutes = clamped)
+    }
+
     fun setBlockAutoKeyboard(blocked: Boolean) {
         prefs.edit().putBoolean(KEY_BLOCK_AUTO_KB, blocked).apply()
         _settings.value = _settings.value.copy(blockAutoKeyboard = blocked)
     }
 
     fun toggleHomeViewMode() {
-        val next = if (_settings.value.homeViewMode == HomeViewMode.GRID) {
-            HomeViewMode.DETAILS_LIST
-        } else {
-            HomeViewMode.GRID
-        }
+        val next = if (_settings.value.homeViewMode == HomeViewMode.GRID) HomeViewMode.DETAILS_LIST else HomeViewMode.GRID
         setHomeViewMode(next)
     }
 
@@ -219,16 +214,26 @@ class AppPreferences(context: Context) {
         return true
     }
 
+    fun shouldRunThrottledVaultSweep(nowMs: Long = System.currentTimeMillis()): Boolean {
+        val last = prefs.getLong(KEY_LAST_VAULT_SWEEP, 0L)
+        if (nowMs - last < 6L * 60 * 60 * 1000) return false
+        prefs.edit().putLong(KEY_LAST_VAULT_SWEEP, nowMs).apply()
+        return true
+    }
+
     companion object {
         private const val KEY_THEME_MODE_V2 = "theme_mode_v2"
         private const val KEY_APP_LANGUAGE = "app_language"
         private const val KEY_FONT_SIZE = "default_font_size_pt"
         private const val KEY_SAVE_FORMAT = "default_save_format"
         private const val KEY_AUTOSAVE_MINUTES = "autosave_interval_minutes_v2"
+        private const val KEY_BREAK_REMINDER_MINUTES = "break_reminder_minutes_v1"
         private const val KEY_LAST_SPLASH_DATE = "last_daily_splash_date"
         private const val KEY_BLOCK_AUTO_KB = "block_auto_keyboard"
-        private const val KEY_HOME_VIEW_MODE = "home_view_mode"
+        private const val KEY_HOME_VIEW_MODE = "home_view_mode_v2"
+        private const val KEY_LAST_VAULT_SWEEP = "last_vault_sweep_at"
 
         val AUTO_SAVE_OPTIONS_MINUTES = listOf(1, 2, 5, 10, 15, 30)
+        val BREAK_REMINDER_OPTIONS_MINUTES = listOf(0, 15, 20, 30)
     }
 }

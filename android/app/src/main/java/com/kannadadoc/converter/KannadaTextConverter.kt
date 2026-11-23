@@ -36,6 +36,18 @@ data class DetectedInputInfo(
     val confidenceNoteKn: String
 )
 
+data class DocumentConversionReport(
+    val document: ParsedDocument,
+    val convertedRuns: Int,
+    val detectedSummary: String
+)
+
+private data class LegacyFontPattern(
+    val id: String,
+    val label: String,
+    val regex: Regex
+)
+
 /**
  * Pure Kotlin bidirectional Kannada converter (exact parity with kannada-converter.js v2):
  * - Auto-detects Nudi / Baraha legacy ASCII vs Unicode Kannada
@@ -48,8 +60,16 @@ object KannadaTextConverter {
     private val KANNADA_UNICODE_REGEX = Regex("[\\u0C80-\\u0CFF]")
     private val NUDI_HIGH_ASCII_REGEX = Regex("[\\u00A2-\\u00FF]")
     private val UNICODE_FONT_REGEX = Regex("(noto.*kannada|anek.*kannada|tunga|lohit|kedage|mallige|hubballi|baloo.*tamma)", RegexOption.IGNORE_CASE)
-    private val LEGACY_FONT_REGEX = Regex("(^nudi|nudi[\\s\\-_]*\\d|kgp|kan[\\-_]?nudi|^brh|baraha|tunga[\\s\\-_]*brh|shree[\\-_]?kan|srilipi|akruti|prakashak)", RegexOption.IGNORE_CASE)
-    private val KANNADA_SPAN_REGEX = Regex("([\\u0C80-\\u0CFF](?:[\\u0C80-\\u0CFF\\u200C\\u200D ]*[\\u0C80-\\u0CFF])?)")
+    private val LEGACY_FONT_PATTERNS = listOf(
+        LegacyFontPattern("nudi", "Nudi / KGP", Regex("(^nudi|nudi[\\s\\-_]*\\d|kgp|kan[\\-_]?nudi)", RegexOption.IGNORE_CASE)),
+        LegacyFontPattern("baraha", "Baraha (BRH)", Regex("(^brh|baraha|tunga[\\s\\-_]*brh)", RegexOption.IGNORE_CASE)),
+        LegacyFontPattern("shreelipi", "ShreeLipi", Regex("(shree[\\-_]?kan|srilipi|shree.*deccan)", RegexOption.IGNORE_CASE)),
+        LegacyFontPattern("akruti", "Akruti", Regex("(akruti|akrutikan)", RegexOption.IGNORE_CASE)),
+        LegacyFontPattern("prakashak", "Prakashak", Regex("(prakashak|kn[\\-_]?tt)", RegexOption.IGNORE_CASE)),
+        LegacyFontPattern("surabhi", "Surabhi / ISM", Regex("(surabhi|ism.*nandi|suchi|winkey|janna)", RegexOption.IGNORE_CASE))
+    )
+    private val KANNADA_SPAN_REGEX = Regex("([\\u0C80-\\u0CE5\\u0CF0-\\u0CFF](?:[\\u0C80-\\u0CE5\\u0CF0-\\u0CFF\\u200C\\u200D ]*[\\u0C80-\\u0CE5\\u0CF0-\\u0CFF])?)")
+    private val KANNADA_DIGITS_REGEX = Regex("[\\u0CE6-\\u0CEF]+")
 
     private val INDEPENDENT_VOWELS = mapOf(
         'C' to "ಅ", 'D' to "ಆ", 'E' to "ಇ", 'F' to "ಈ", 'G' to "ಉ", 'H' to "ಊ",
@@ -173,8 +193,15 @@ object KannadaTextConverter {
 
     fun hasKannadaUnicode(text: String): Boolean = KANNADA_UNICODE_REGEX.containsMatchIn(text)
 
-    fun hasLegacyAsciiSignature(text: String): Boolean =
-        text.isNotEmpty() && !hasKannadaUnicode(text) && NUDI_HIGH_ASCII_REGEX.containsMatchIn(text)
+    fun hasNudiHighAscii(text: String): Boolean =
+        text.isNotEmpty() && NUDI_HIGH_ASCII_REGEX.containsMatchIn(text)
+
+    fun hasLegacyAsciiSignature(text: String): Boolean = hasNudiHighAscii(text)
+
+    fun healMixedKannadaText(text: String): String {
+        if (!hasNudiHighAscii(text)) return text
+        return convertMixedAsciiToUnicode(text)
+    }
 
     /**
      * Auto-detects whether pasted text is Unicode Kannada or Legacy Nudi/Baraha ASCII.
@@ -251,14 +278,14 @@ object KannadaTextConverter {
         for (match in tokenRegex.findAll(text)) {
             val token = text.substring(lastEnd, match.range.first)
             if (token.isNotEmpty()) {
-                sb.append(if (hasLegacyAsciiSignature(token)) convertNudiToUnicode(token) else token)
+                sb.append(if (hasNudiHighAscii(token)) convertNudiToUnicode(token) else token)
             }
             sb.append(match.value)
             lastEnd = match.range.last + 1
         }
         val tail = text.substring(lastEnd)
         if (tail.isNotEmpty()) {
-            sb.append(if (hasLegacyAsciiSignature(tail)) convertNudiToUnicode(tail) else tail)
+            sb.append(if (hasNudiHighAscii(tail)) convertNudiToUnicode(tail) else tail)
         }
         return sb.toString()
     }
@@ -468,12 +495,23 @@ object KannadaTextConverter {
 
     fun convertUnicodeToNudi(text: String): String {
         if (text.isEmpty() || !hasKannadaUnicode(text)) return text
-        val out = StringBuilder(text.length * 2)
+        val cleaned = text.replace("\u200C", "").replace("\u200D", "")
+        val out = StringBuilder(cleaned.length * 2)
         var i = 0
-        val n = text.length
+        val n = cleaned.length
 
         while (i < n) {
-            val ch = text[i]
+            val ch = cleaned[i]
+            if (ch in '\u0CE6'..'\u0CEF') {
+                out.append(('0'.code + (ch.code - 0x0CE6)).toChar())
+                i++
+                continue
+            }
+            if (ch == '್') {
+                out.append('ï')
+                i++
+                continue
+            }
             val revV = REV_VOWELS[ch]
             if (revV != null) {
                 out.append(revV)
@@ -483,18 +521,18 @@ object KannadaTextConverter {
             if (isKannadaConsonant(ch)) {
                 var arkavattu = false
                 var base = ch
-                if (ch == 'ರ' && i + 2 < n && text[i + 1] == '್' && isKannadaConsonant(text[i + 2])) {
+                if (ch == 'ರ' && i + 2 < n && cleaned[i + 1] == '್' && isKannadaConsonant(cleaned[i + 2])) {
                     arkavattu = true
-                    base = text[i + 2]
+                    base = cleaned[i + 2]
                     i += 3
                 } else {
                     i++
                 }
                 val ottas = StringBuilder()
                 var trailingHalant = false
-                while (i < n && text[i] == '್') {
-                    if (i + 1 < n && isKannadaConsonant(text[i + 1])) {
-                        REV_OTTA[text[i + 1]]?.let { ottas.append(it) }
+                while (i < n && cleaned[i] == '್') {
+                    if (i + 1 < n && isKannadaConsonant(cleaned[i + 1])) {
+                        REV_OTTA[cleaned[i + 1]]?.let { ottas.append(it) }
                         i += 2
                     } else {
                         trailingHalant = true
@@ -503,8 +541,8 @@ object KannadaTextConverter {
                     }
                 }
                 var vowel = if (trailingHalant) "್" else ""
-                if (!trailingHalant && i < n && text[i] in MATRAS) {
-                    vowel = text[i].toString()
+                if (!trailingHalant && i < n && cleaned[i] in MATRAS) {
+                    vowel = cleaned[i].toString()
                     i++
                 }
                 val ottaStr = ottas.toString()
@@ -523,27 +561,62 @@ object KannadaTextConverter {
     }
 
     /**
-     * Normalizes a ParsedDocument's legacy runs to Unicode Kannada (for Home-screen direct export).
+     * Single-source-of-truth document conversion engine (used by Editor load, Home export,
+     * and Standalone Converter — completely retires the duplicate JS converter).
      */
-    fun normalizeDocumentToUnicode(doc: ParsedDocument): ParsedDocument {
-        fun convertPara(p: DocBlock.Paragraph): DocBlock.Paragraph {
-            val newRuns = p.runs.map { run ->
-                val raw = run.text
-                if (raw.isEmpty() || hasKannadaUnicode(raw)) {
-                    run.copy(fontFamily = "Noto Sans Kannada")
-                } else {
-                    val font = run.fontFamily ?: ""
-                    val converted = when {
-                        UNICODE_FONT_REGEX.containsMatchIn(font) -> raw
-                        LEGACY_FONT_REGEX.containsMatchIn(font) -> convertNudiToUnicode(raw)
-                        hasLegacyAsciiSignature(raw) -> convertMixedAsciiToUnicode(raw)
-                        else -> raw
-                    }
-                    run.copy(text = converted, fontFamily = "Noto Sans Kannada")
-                }
+    fun normalizeDocumentWithReport(
+        doc: ParsedDocument,
+        converterOverride: String = "auto"
+    ): DocumentConversionReport {
+        var convertedRuns = 0
+        val detectedLabels = linkedSetOf<String>()
+
+        fun convertRun(run: TextRun): TextRun {
+            val raw = run.text
+            if (raw.isEmpty() || converterOverride == "none") {
+                return run.copy(fontFamily = "Noto Sans Kannada")
             }
-            return p.copy(runs = newRuns)
+
+            val hasLegacyHighAscii = hasNudiHighAscii(raw)
+            val font = run.fontFamily ?: ""
+            val matchedFontPattern = LEGACY_FONT_PATTERNS.firstOrNull { it.regex.containsMatchIn(font) }
+
+            if (hasKannadaUnicode(raw) && !hasLegacyHighAscii && matchedFontPattern == null) {
+                return run.copy(fontFamily = "Noto Sans Kannada")
+            }
+
+            if (converterOverride.isNotBlank() && converterOverride != "auto") {
+                val converted = if (hasLegacyHighAscii) convertMixedAsciiToUnicode(raw) else raw
+                if (converted != raw) {
+                    convertedRuns++
+                    detectedLabels.add(converterOverride.uppercase())
+                }
+                return run.copy(text = converted, fontFamily = "Noto Sans Kannada")
+            }
+
+            if (matchedFontPattern != null) {
+                val converted = convertNudiToUnicode(raw)
+                if (converted != raw) {
+                    convertedRuns++
+                    detectedLabels.add(matchedFontPattern.label)
+                }
+                return run.copy(text = converted, fontFamily = "Noto Sans Kannada")
+            }
+
+            if (hasLegacyHighAscii) {
+                val converted = convertMixedAsciiToUnicode(raw)
+                if (converted != raw) {
+                    convertedRuns++
+                    detectedLabels.add("Nudi / ASCII (Auto-Detected)")
+                }
+                return run.copy(text = converted, fontFamily = "Noto Sans Kannada")
+            }
+
+            return run.copy(fontFamily = "Noto Sans Kannada")
         }
+
+        fun convertPara(p: DocBlock.Paragraph): DocBlock.Paragraph =
+            p.copy(runs = p.runs.map { convertRun(it) })
 
         val newBlocks = doc.blocks.map { block ->
             when (block) {
@@ -553,26 +626,61 @@ object KannadaTextConverter {
                 )
             }
         }
-        return doc.copy(blocks = newBlocks)
+        return DocumentConversionReport(
+            document = doc.copy(blocks = newBlocks),
+            convertedRuns = convertedRuns,
+            detectedSummary = detectedLabels.joinToString(", ")
+        )
     }
+
+    /**
+     * Normalizes a ParsedDocument's legacy runs to Modern Universal Kannada (Unicode).
+     */
+    fun normalizeDocumentToUnicode(doc: ParsedDocument): ParsedDocument =
+        normalizeDocumentWithReport(doc, "auto").document
 
     /**
      * Splits mixed English + Kannada Unicode runs into script-isolated runs for PC Nudi/Baraha export.
      */
     fun prepareDocumentForLegacyExport(unicodeDoc: ParsedDocument, legacyFontName: String): ParsedDocument {
+        fun appendNonLegacySegment(out: MutableList<TextRun>, run: TextRun, segment: String) {
+            if (segment.isEmpty()) return
+            var segPos = 0
+            for (digitMatch in KANNADA_DIGITS_REGEX.findAll(segment)) {
+                if (digitMatch.range.first > segPos) {
+                    out.add(
+                        run.copy(
+                            text = segment.substring(segPos, digitMatch.range.first),
+                            fontFamily = "Calibri"
+                        )
+                    )
+                }
+                out.add(
+                    run.copy(
+                        text = digitMatch.value,
+                        fontFamily = "Tunga"
+                    )
+                )
+                segPos = digitMatch.range.last + 1
+            }
+            if (segPos < segment.length) {
+                out.add(
+                    run.copy(
+                        text = segment.substring(segPos),
+                        fontFamily = "Calibri"
+                    )
+                )
+            }
+        }
+
         fun splitRun(run: TextRun): List<TextRun> {
-            val text = run.text
+            val text = healMixedKannadaText(run.text)
             if (text.isEmpty()) return emptyList()
             val result = mutableListOf<TextRun>()
             var lastEnd = 0
             for (match in KANNADA_SPAN_REGEX.findAll(text)) {
                 if (match.range.first > lastEnd) {
-                    result.add(
-                        run.copy(
-                            text = text.substring(lastEnd, match.range.first),
-                            fontFamily = "Calibri"
-                        )
-                    )
+                    appendNonLegacySegment(result, run, text.substring(lastEnd, match.range.first))
                 }
                 result.add(
                     run.copy(
@@ -583,12 +691,7 @@ object KannadaTextConverter {
                 lastEnd = match.range.last + 1
             }
             if (lastEnd < text.length) {
-                result.add(
-                    run.copy(
-                        text = text.substring(lastEnd),
-                        fontFamily = "Calibri"
-                    )
-                )
+                appendNonLegacySegment(result, run, text.substring(lastEnd))
             }
             return result
         }

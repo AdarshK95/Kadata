@@ -1,5 +1,12 @@
 package com.kannadadoc.ui.common
 
+import android.app.Activity
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.provider.DocumentsContract
+import androidx.activity.result.contract.ActivityResultContract
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -24,6 +31,33 @@ import com.kannadadoc.data.local.DefaultSaveFormat
 import com.kannadadoc.ui.editor.ExportAction
 import com.kannadadoc.ui.editor.KannadaEncodingChoice
 import com.kannadadoc.ui.editor.TargetFileType
+
+/**
+ * Dynamic SAF CreateDocument contract accepting Pair(suggestedFileName, mimeType)
+ * so a single launcher cleanly handles all 9 export formats (.docx, .doc, .pdf, .odt, .txt, .rtf, .zip, .epub, Google Docs).
+ */
+data class CreateDocumentRequest(
+    val suggestedName: String,
+    val mimeType: String,
+    val initialParentUri: Uri? = null
+)
+
+class CreateDocumentWithMimeContract : ActivityResultContract<CreateDocumentRequest, Uri?>() {
+    override fun createIntent(context: Context, input: CreateDocumentRequest): Intent {
+        return Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = input.mimeType
+            putExtra(Intent.EXTRA_TITLE, input.suggestedName)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && input.initialParentUri != null) {
+                putExtra(DocumentsContract.EXTRA_INITIAL_URI, input.initialParentUri)
+            }
+        }
+    }
+
+    override fun parseResult(resultCode: Int, intent: Intent?): Uri? {
+        return if (resultCode == Activity.RESULT_OK) intent?.data else null
+    }
+}
 
 @Composable
 fun TwoStepFormatExportDialog(
@@ -100,7 +134,7 @@ fun TwoStepFormatExportDialog(
             confirmButton = {},
             dismissButton = {
                 TextButton(onClick = onDismiss) {
-                    Text(if (knOnly) "ರದ್ದು" else "Cancel")
+                    Text(if (knOnly) "ರದ್ದು" else "Cancel • ರದ್ದು")
                 }
             }
         )
@@ -109,10 +143,13 @@ fun TwoStepFormatExportDialog(
             onDismissRequest = onDismiss,
             title = { Text("$actionTitle (${chosenEncoding.bilingualTitle})") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     Text(
                         text = if (knOnly) "ಹಂತ 2/2: ಫೈಲ್ ಪ್ರಕಾರ ಆಯ್ಕೆಮಾಡಿ"
-                        else "Step 2 of 2: Choose file type",
+                        else "Step 2 of 2: Choose file format • ಹಂತ 2/2: ಫೈಲ್ ಪ್ರಕಾರ ಆಯ್ಕೆಮಾಡಿ",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -121,9 +158,12 @@ fun TwoStepFormatExportDialog(
                             onClick = { onSelectFileType(chosenEncoding, fileType) },
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(50.dp)
+                                .height(46.dp)
                         ) {
-                            Text(fileType.label, style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                text = fileType.label,
+                                style = MaterialTheme.typography.labelLarge
+                            )
                         }
                     }
                 }
@@ -132,10 +172,10 @@ fun TwoStepFormatExportDialog(
             dismissButton = {
                 Row {
                     TextButton(onClick = onBackToEncoding) {
-                        Text(if (knOnly) "ಹಿಂದೆ" else "Back")
+                        Text(if (knOnly) "ಹಿಂದೆ" else "Back • ಹಿಂದೆ")
                     }
                     TextButton(onClick = onDismiss) {
-                        Text(if (knOnly) "ರದ್ದು" else "Cancel")
+                        Text(if (knOnly) "ರದ್ದು" else "Cancel • ರದ್ದು")
                     }
                 }
             }

@@ -25,9 +25,14 @@
   let caretSyncInterval = null;
   let caretSolidTimer = null;
 
-  let sourceDoc = null;
+  let sourceDoc = null; // Pre-converted Modern Universal Kannada IDM from Kotlin
+  let originalDoc = null; // Raw pre-conversion IDM strictly for Read-Only Original View
   let activeConverter = 'auto';
   let isOriginalView = false;
+  let isExternalReadOnly = false;
+  let hasUserEdited = false;
+  let lastTrackedTextLen = 0;
+  let maxPasteChars = 1500000;
   let savedEditableHtml = null;
   let autoSaveTimer = null;
 
@@ -45,13 +50,22 @@
   let osKeyboardAllowedOnce = false;
   let isComposing = false;
 
-  // Custom 100-Undo / 100-Redo History Manager state
+  // Universal document zoom state (50% - 300%, works in Editable & Read-Only Original views)
+  let currentZoomPercent = 100;
+  let pinchStartDist = 0;
+  let pinchStartZoom = 100;
+  let pinchAnchorScrollRatio = 0;
+  let isPinching = false;
+
+  // Custom 100-Undo / 100-Redo History Manager state (bounded by BOTH 100 steps AND 10 MB budget)
   const MAX_HISTORY_STEPS = 100;
+  const MAX_HISTORY_CHARS = 6 * 1024 * 1024; // ~6 MB budget across undo + redo stacks (OOM-safe)
   let undoStack = [];
   let redoStack = [];
   let currentBaseline = null; // { html: string, caret: { blockIndex, charOffset } | null }
   let historyDebounceTimer = null;
   let isRestoringHistory = false;
+  let notifiedHistoryTrim = false;
 
   const KANNADA_TRAILING_SIGN_RE = /[\u0CBE-\u0CCC\u0C82\u0C83]$/;
   const ZERO_WIDTH_RE = /[\u200B\uFEFF\u00AD\u2060]/g;
@@ -93,7 +107,7 @@
 
   function getEditableBlocks() {
     const blocks = Array.from(paper.querySelectorAll('p, h1, h2, h3, h4, li, td, th'));
-    const leafBlocks = blocks.filter(el => !el.querySelector('p, h1, h2, h3, h4, li'));
+    const leafBlocks = blocks.filter(el => !el.querySelector('p, h1, h2, h3, h4, li, td, th'));
     return leafBlocks.length > 0 ? leafBlocks : [paper];
   }
 
@@ -556,6 +570,37 @@
     };
   }
 
+  function enforceHistoryMemoryBudget() {
+    let totalChars = currentBaseline && currentBaseline.html ? currentBaseline.html.length : 0;
+    for (let i = 0; i < undoStack.length; i++) {
+      totalChars += undoStack[i].html ? undoStack[i].html.length : 0;
+    }
+    for (let i = 0; i < redoStack.length; i++) {
+      totalChars += redoStack[i].html ? redoStack[i].html.length : 0;
+    }
+    let evicted = false;
+    while (totalChars > MAX_HISTORY_CHARS && (undoStack.length > 1 || redoStack.length > 1)) {
+      if (redoStack.length > 1) {
+        const dropped = redoStack.shift();
+        totalChars -= dropped && dropped.html ? dropped.html.length : 0;
+        evicted = true;
+      } else if (undoStack.length > 1) {
+        const dropped = undoStack.shift();
+        totalChars -= dropped && dropped.html ? dropped.html.length : 0;
+        evicted = true;
+      } else {
+        break;
+      }
+    }
+    if (evicted && !notifiedHistoryTrim) {
+      notifiedHistoryTrim = true;
+      notifyAndroid(
+        'onEditorWarning',
+        'Large document: oldest undo steps were trimmed to stay within the 10 MB memory limit. Please save regularly.'
+      );
+    }
+  }
+
   function resetHistoryToCurrent() {
     if (historyDebounceTimer) {
       clearTimeout(historyDebounceTimer);
@@ -563,6 +608,7 @@
     }
     undoStack = [];
     redoStack = [];
+    notifiedHistoryTrim = false;
     currentBaseline = takeCleanSnapshot(null);
   }
 
@@ -591,6 +637,7 @@
     }
     redoStack = [];
     currentBaseline = nextSnap;
+    enforceHistoryMemoryBudget();
   }
 
   function scheduleHistoryCommit(immediate) {
@@ -756,11 +803,149 @@
     }
   });
 
+  function applyDocumentZoom(nextPercent, anchorViewportY) {
+    const clamped = Math.max(50, Math.min(300, Math.round(nextPercent)));
+    if (clamped === currentZoomPercent) return clamped;
+
+    const prevScrollHeight = Math.max(1, document.documentElement.scrollHeight);
+    const focusY = (typeof anchorViewportY === 'number')
+      ? anchorViewportY
+      : Math.round(getVisibleViewportHeight() * 0.35);
+    const prevRatio = (window.scrollY + focusY) / prevScrollHeight;
+
+    currentZoomPercent = clamped;
+    document.documentElement.style.setProperty('--doc-zoom', String(clamped / 100));
+
+    // Keep the reading line smoothly anchored near the pinch midpoint
+    const newScrollHeight = Math.max(1, document.documentElement.scrollHeight);
+    const nextScrollY = Math.max(0, Math.round(prevRatio * newScrollHeight - focusY));
+    if (Math.abs(nextScrollY - window.scrollY) > 4) {
+      window.scrollTo({ top: nextScrollY, left: 0, behavior: 'auto' });
+    }
+    if (virtualKbOpen) {
+      updateVirtualCaretVisual(false);
+    }
+    notifyAndroid('onZoomChanged', currentZoomPercent);
+    return currentZoomPercent;
+  }
+
+  function getTouchDistance(t1, t2) {
+    const dx = t1.clientX - t2.clientX;
+    const dy = t1.clientY - t2.clientY;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  document.addEventListener('touchstart', (e) => {
+    if (e.touches && e.touches.length === 2) {
+      isPinching = true;
+      pinchStartDist = getTouchDistance(e.touches[0], e.touches[1]);
+      pinchStartZoom = currentZoomPercent;
+      const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+      const sh = Math.max(1, document.documentElement.scrollHeight);
+      pinchAnchorScrollRatio = (window.scrollY + midY) / sh;
+    }
+  }, { passive: true });
+
+  document.addEventListener('touchmove', (e) => {
+    if (isPinching && e.touches && e.touches.length === 2 && pinchStartDist > 12) {
+      e.preventDefault();
+      const curDist = getTouchDistance(e.touches[0], e.touches[1]);
+      const ratio = curDist / pinchStartDist;
+      const targetZoom = Math.max(50, Math.min(300, Math.round(pinchStartZoom * ratio)));
+      if (Math.abs(targetZoom - currentZoomPercent) >= 2) {
+        const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+        currentZoomPercent = targetZoom;
+        document.documentElement.style.setProperty('--doc-zoom', String(targetZoom / 100));
+        const newSh = Math.max(1, document.documentElement.scrollHeight);
+        const destY = Math.max(0, Math.round(pinchAnchorScrollRatio * newSh - midY));
+        window.scrollTo({ top: destY, left: 0, behavior: 'auto' });
+        if (virtualKbOpen) updateVirtualCaretVisual(false);
+        notifyAndroid('onZoomChanged', currentZoomPercent);
+      }
+    }
+  }, { passive: false });
+
+  document.addEventListener('touchend', (e) => {
+    if (isPinching && (!e.touches || e.touches.length < 2)) {
+      isPinching = false;
+      pinchStartDist = 0;
+    }
+  }, { passive: true });
+
+  document.addEventListener('touchcancel', () => {
+    isPinching = false;
+    pinchStartDist = 0;
+  }, { passive: true });
+
+  function reportEditDelta(explicitDelta, isLargePaste) {
+    const curLen = (paper.textContent || '').length;
+    const delta = explicitDelta !== undefined
+      ? Math.abs(explicitDelta)
+      : Math.max(1, Math.abs(curLen - lastTrackedTextLen));
+    lastTrackedTextLen = curLen;
+    hasUserEdited = true;
+    notifyAndroid('onEditDelta', delta, !!isLargePaste, curLen);
+  }
+
+  paper.addEventListener('paste', (e) => {
+    if (isOriginalView || isExternalReadOnly) {
+      e.preventDefault();
+      return;
+    }
+    try {
+      const cd = e.clipboardData || window.clipboardData;
+      if (!cd) return;
+      const plain = cd.getData('text/plain') || '';
+      if (!plain) return;
+      e.preventDefault();
+
+      if (plain.length > maxPasteChars) {
+        const limitKb = Math.round(maxPasteChars / 1000);
+        notifyAndroid(
+          'onEditorWarning',
+          'Paste too large for device memory (' + Math.round(plain.length / 1000) +
+            'K chars; max ' + limitKb + 'K chars). Please paste in smaller sections to avoid crashes.'
+        );
+        return;
+      }
+
+      if (plain.length >= 150000 && hasUserEdited) {
+        flushDraftNow(true);
+      }
+
+      const preCaret = serializeCaretPosition();
+      const normalized = plain.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      const lines = normalized.split('\n');
+
+      if (lines.length === 1) {
+        document.execCommand('insertText', false, lines[0]);
+      } else {
+        const fragHtml = lines.map((line) => {
+          const escaped = line
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+          return '<p>' + (escaped || '<br>') + '</p>';
+        }).join('');
+        document.execCommand('insertHTML', false, fragHtml);
+      }
+
+      captureSelectionRange();
+      commitHistoryStep(preCaret);
+      notifyAndroid('onContentDirty');
+      reportEditDelta(plain.length, plain.length >= 300);
+      scheduleAutoSave();
+      scrollCaretIntoSafeView(false);
+    } catch (err) {
+      notifyAndroid('onEditorWarning', 'Paste could not be processed cleanly: ' + String(err));
+    }
+  });
+
   paper.addEventListener('input', (e) => {
-    if (isOriginalView || isRestoringHistory) return;
-    // CRITICAL: Capture the new post-keystroke caret IMMEDIATELY before scrolling or saving!
+    if (isOriginalView || isExternalReadOnly || isRestoringHistory) return;
     captureSelectionRange();
     notifyAndroid('onContentDirty');
+    reportEditDelta(undefined, (e && e.inputType === 'insertFromPaste'));
     scheduleAutoSave();
     if (!isComposing) {
       const iType = (e && e.inputType) || '';
@@ -912,29 +1097,55 @@
     return matches;
   }
 
-  function wrapMatchSegments(segments) {
-    const createdMarks = [];
-    for (let s = 0; s < segments.length; s++) {
-      const seg = segments[s];
-      const node = seg.node;
-      if (!node || !node.parentNode) continue;
+  function wrapAllBlockMatches(blockMatches) {
+    const matchGroups = blockMatches.map(() => []);
+    const nodeSlices = new Map();
+
+    for (let m = 0; m < blockMatches.length; m++) {
+      const segs = blockMatches[m];
+      for (let s = 0; s < segs.length; s++) {
+        const seg = segs[s];
+        const node = seg.node;
+        if (!node || !node.parentNode) continue;
+        let list = nodeSlices.get(node);
+        if (!list) {
+          list = [];
+          nodeSlices.set(node, list);
+        }
+        list.push({ matchIdx: m, start: seg.start, end: seg.end });
+      }
+    }
+
+    nodeSlices.forEach((slices, node) => {
+      if (!node || !node.parentNode) return;
       const text = node.nodeValue || '';
-      const start = Math.max(0, Math.min(seg.start, text.length));
-      const end = Math.max(start, Math.min(seg.end, text.length));
-      if (end <= start) continue;
+      slices.sort((a, b) => a.start - b.start);
 
       const frag = document.createDocumentFragment();
-      if (start > 0) frag.appendChild(document.createTextNode(text.slice(0, start)));
-      const mark = document.createElement('mark');
-      mark.className = 'kd-search-match';
-      mark.textContent = text.slice(start, end);
-      frag.appendChild(mark);
-      if (end < text.length) frag.appendChild(document.createTextNode(text.slice(end)));
+      let cursor = 0;
+      for (let i = 0; i < slices.length; i++) {
+        const sl = slices[i];
+        const start = Math.max(cursor, Math.min(sl.start, text.length));
+        const end = Math.max(start, Math.min(sl.end, text.length));
+        if (end <= start) continue;
 
+        if (start > cursor) {
+          frag.appendChild(document.createTextNode(text.slice(cursor, start)));
+        }
+        const mark = document.createElement('mark');
+        mark.className = 'kd-search-match';
+        mark.textContent = text.slice(start, end);
+        frag.appendChild(mark);
+        matchGroups[sl.matchIdx].push(mark);
+        cursor = end;
+      }
+      if (cursor < text.length) {
+        frag.appendChild(document.createTextNode(text.slice(cursor)));
+      }
       node.parentNode.replaceChild(frag, node);
-      createdMarks.push(mark);
-    }
-    return createdMarks;
+    });
+
+    return matchGroups;
   }
 
   function performSearch(rawQuery, preferredIndex) {
@@ -956,10 +1167,7 @@
       const blockMatches = findMatchesInBlock(blocks[b], needleLower);
       if (blockMatches.length === 0) continue;
 
-      const blockGroups = new Array(blockMatches.length);
-      for (let m = blockMatches.length - 1; m >= 0; m--) {
-        blockGroups[m] = wrapMatchSegments(blockMatches[m]);
-      }
+      const blockGroups = wrapAllBlockMatches(blockMatches);
       for (let m = 0; m < blockGroups.length; m++) {
         if (blockGroups[m] && blockGroups[m].length > 0) {
           searchMatches.push(blockGroups[m]);
@@ -1017,16 +1225,7 @@
     }
 
     for (const run of runs) {
-      if (useOriginalFont) {
-        el.appendChild(renderRunElement(run, run.text || '', true));
-      } else {
-        const res = global.KannadaConverter.convertRun(run, converterOverride);
-        if (res.converted) {
-          stats.convertedRuns++;
-          if (res.detectedLabel) stats.labels.add(res.detectedLabel);
-        }
-        el.appendChild(renderRunElement(run, res.text, false));
-      }
+      el.appendChild(renderRunElement(run, run.text || '', useOriginalFont));
     }
     return el;
   }
@@ -1103,30 +1302,17 @@
     if (node.nodeType === Node.TEXT_NODE) {
       const raw = node.nodeValue || '';
       if (raw.length > 0) {
-        if (legacyFontName) {
-          const splitSegments = global.KannadaConverter.splitRunsForLegacyExport(raw, legacyFontName);
-          for (const seg of splitSegments) {
-            outRuns.push({
-              text: seg.text,
-              fontFamily: seg.fontFamily,
-              bold: !!inheritedStyle.bold,
-              italic: !!inheritedStyle.italic,
-              underline: !!inheritedStyle.underline,
-              fontSizePt: null,
-              colorHex: inheritedStyle.colorHex || null
-            });
-          }
-        } else {
-          outRuns.push({
-            text: raw,
-            fontFamily: 'Noto Sans Kannada',
-            bold: !!inheritedStyle.bold,
-            italic: !!inheritedStyle.italic,
-            underline: !!inheritedStyle.underline,
-            fontSizePt: null,
-            colorHex: inheritedStyle.colorHex || null
-          });
-        }
+        // Always emit pure Modern Universal Kannada IDM; Kotlin KannadaTextConverter
+        // performs all legacy PC script-splitting on export as the single source of truth.
+        outRuns.push({
+          text: raw,
+          fontFamily: 'Noto Sans Kannada',
+          bold: !!inheritedStyle.bold,
+          italic: !!inheritedStyle.italic,
+          underline: !!inheritedStyle.underline,
+          fontSizePt: null,
+          colorHex: inheritedStyle.colorHex || null
+        });
       }
       return;
     }
@@ -1182,6 +1368,150 @@
     };
   }
 
+  function getDirectTableRowElements(tableEl) {
+    const trs = [];
+    for (const ch of tableEl.children) {
+      const t = ch.tagName.toUpperCase();
+      if (t === 'TR') {
+        trs.push(ch);
+      } else if (t === 'THEAD' || t === 'TBODY' || t === 'TFOOT') {
+        for (const rowEl of ch.children) {
+          if (rowEl.tagName.toUpperCase() === 'TR') {
+            trs.push(rowEl);
+          }
+        }
+      }
+    }
+    return trs;
+  }
+
+  function getDirectRowCellElements(trEl) {
+    const cells = [];
+    for (const ch of trEl.children) {
+      const t = ch.tagName.toUpperCase();
+      if (t === 'TD' || t === 'TH') {
+        cells.push(ch);
+      }
+    }
+    return cells;
+  }
+
+  function flattenNestedTableToParagraphs(nestedTableEl, legacyFontName, depth) {
+    if (depth > 16) return [];
+    const out = [];
+    const trs = getDirectTableRowElements(nestedTableEl);
+    for (const tr of trs) {
+      const cells = getDirectRowCellElements(tr);
+      const nonEmptyCellParas = [];
+      for (const cell of cells) {
+        const paras = extractCellParagraphs(cell, legacyFontName, depth + 1)
+          .filter(p => p.runs && p.runs.some(r => r.text && r.text.length > 0));
+        if (paras.length > 0) nonEmptyCellParas.push(paras);
+      }
+      if (nonEmptyCellParas.length === 0) continue;
+
+      if (nonEmptyCellParas.length > 1 && nonEmptyCellParas.every(ps => ps.length === 1)) {
+        const combinedRuns = [];
+        for (let i = 0; i < nonEmptyCellParas.length; i++) {
+          if (i > 0) {
+            combinedRuns.push({
+              text: '  |  ',
+              fontFamily: null, bold: false, italic: false, underline: false,
+              fontSizePt: null, colorHex: null
+            });
+          }
+          for (const r of nonEmptyCellParas[i][0].runs) combinedRuns.push(r);
+        }
+        out.push({
+          type: 'paragraph',
+          runs: combinedRuns,
+          headingLevel: 0,
+          alignment: nonEmptyCellParas[0][0].alignment || 'left',
+          listType: null
+        });
+      } else {
+        for (const paras of nonEmptyCellParas) {
+          for (const p of paras) out.push(p);
+        }
+      }
+    }
+    return out;
+  }
+
+  function extractCellParagraphs(cellEl, legacyFontName, depth) {
+    const cellParas = [];
+    let inlineRuns = [];
+
+    function flushInlineRuns() {
+      if (inlineRuns.some(r => r.text && r.text.trim().length > 0)) {
+        cellParas.push({
+          type: 'paragraph',
+          runs: inlineRuns,
+          headingLevel: 0,
+          alignment: 'left',
+          listType: null
+        });
+      }
+      inlineRuns = [];
+    }
+
+    const BLOCK_TAGS = new Set(['P', 'DIV', 'H1', 'H2', 'H3', 'H4', 'BLOCKQUOTE', 'PRE']);
+    for (const node of cellEl.childNodes) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        collectRunsFromNode(node, {}, inlineRuns, legacyFontName);
+        continue;
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) continue;
+      const t = node.tagName.toUpperCase();
+      if (t === 'TABLE') {
+        flushInlineRuns();
+        const nestedParas = flattenNestedTableToParagraphs(node, legacyFontName, depth + 1);
+        for (const np of nestedParas) cellParas.push(np);
+      } else if (t === 'UL' || t === 'OL') {
+        flushInlineRuns();
+        for (const li of node.children) {
+          if (li.tagName.toUpperCase() === 'LI') {
+            cellParas.push(extractParagraphFromElement(li, null, legacyFontName));
+          }
+        }
+      } else if (BLOCK_TAGS.has(t)) {
+        flushInlineRuns();
+        if (node.querySelector('table')) {
+          const innerParas = extractCellParagraphs(node, legacyFontName, depth + 1);
+          for (const ip of innerParas) cellParas.push(ip);
+        } else {
+          cellParas.push(extractParagraphFromElement(node, null, legacyFontName));
+        }
+      } else {
+        collectRunsFromNode(node, {}, inlineRuns, legacyFontName);
+      }
+    }
+    flushInlineRuns();
+
+    if (cellParas.length === 0) {
+      cellParas.push({
+        type: 'paragraph',
+        runs: [],
+        headingLevel: 0,
+        alignment: 'left',
+        listType: null
+      });
+    }
+    return cellParas;
+  }
+
+  function extractDirectTableRowsToIdm(tableEl, legacyFontName) {
+    const rows = [];
+    for (const tr of getDirectTableRowElements(tableEl)) {
+      const cells = [];
+      for (const cell of getDirectRowCellElements(tr)) {
+        cells.push(extractCellParagraphs(cell, legacyFontName, 0));
+      }
+      if (cells.length > 0) rows.push(cells);
+    }
+    return rows;
+  }
+
   function serializeRootToIdm(rootEl, legacyFontName) {
     const blocks = [];
 
@@ -1204,24 +1534,10 @@
       const tag = child.tagName.toUpperCase();
 
       if (tag === 'TABLE') {
-        const rows = [];
-        for (const tr of child.querySelectorAll('tr')) {
-          const cells = [];
-          for (const cell of tr.querySelectorAll('td, th')) {
-            const cellParas = [];
-            const pChildren = Array.from(cell.children).filter(c => ['P', 'DIV', 'H1', 'H2', 'H3'].includes(c.tagName.toUpperCase()));
-            if (pChildren.length > 0) {
-              for (const pc of pChildren) {
-                cellParas.push(extractParagraphFromElement(pc, null, legacyFontName));
-              }
-            } else {
-              cellParas.push(extractParagraphFromElement(cell, null, legacyFontName));
-            }
-            cells.push(cellParas);
-          }
-          if (cells.length > 0) rows.push(cells);
+        const rows = extractDirectTableRowsToIdm(child, legacyFontName);
+        if (rows.length > 0) {
+          blocks.push({ type: 'table', rows });
         }
-        blocks.push({ type: 'table', rows });
       } else if (tag === 'UL' || tag === 'OL') {
         const listType = tag === 'OL' ? 'ordered' : 'bullet';
         for (const li of child.children) {
@@ -1244,63 +1560,62 @@
   }
 
   function scheduleAutoSave() {
-    if (isOriginalView) return;
+    if (isOriginalView || isExternalReadOnly) return;
     if (autoSaveTimer) clearTimeout(autoSaveTimer);
     autoSaveTimer = setTimeout(() => {
-      flushDraftNow();
-    }, 1800);
+      flushDraftNow(false);
+    }, 2800);
   }
 
-  function flushDraftNow() {
-    if (isOriginalView) return;
-    const cleanClone = getCleanPaperClone();
-    const html = cleanClone.innerHTML;
-    const idmJson = JSON.stringify(serializeRootToIdm(cleanClone, null));
-    notifyAndroid('onDraftChanged', html, idmJson);
+  function flushDraftNow(force) {
+    if (isOriginalView || isExternalReadOnly) return;
+    if (!force && !hasUserEdited) return;
+    try {
+      const cleanClone = getCleanPaperClone();
+      const idmObj = serializeRootToIdm(cleanClone, null);
+      const idmJson = JSON.stringify(idmObj);
+      const charCount = (cleanClone.textContent || '').length;
+      notifyAndroid('onCheckpointReady', idmJson, charCount);
+    } catch (err) {
+      notifyAndroid('onEditorWarning', 'Auto-recovery checkpoint error: ' + String(err));
+    }
   }
 
   // =========================================================================
   // Public Android -> WebView Editor Controller API
   // =========================================================================
   global.KannadaDocEditor = {
-    loadDocument(parsedDocJson, converterOverride, savedDraftHtml) {
+    loadDocument(unicodeDocJson, originalDocJson, savedDraftHtml, convertedCount, detectedSummary) {
       try {
-        sourceDoc = JSON.parse(parsedDocJson);
-        activeConverter = converterOverride || 'auto';
+        sourceDoc = JSON.parse(unicodeDocJson);
+        originalDoc = originalDocJson ? JSON.parse(originalDocJson) : sourceDoc;
         isOriginalView = false;
+        hasUserEdited = false;
         savedCaretRange = null;
+        currentZoomPercent = 100;
+        document.documentElement.style.setProperty('--doc-zoom', '1');
+        notifyAndroid('onZoomChanged', 100);
         originalBanner.classList.add('hidden');
         paper.classList.remove('read-only-original');
-        paper.setAttribute('contenteditable', 'true');
+        paper.setAttribute('contenteditable', isExternalReadOnly ? 'false' : 'true');
         applyInputModeState();
 
         if (savedDraftHtml && savedDraftHtml.trim().length > 0) {
           paper.innerHTML = savedDraftHtml;
           unwrapMarksIn(paper);
           resetHistoryToCurrent();
+          lastTrackedTextLen = (paper.textContent || '').length;
           notifyAndroid('onDocumentLoaded', 0, '', true);
           return;
         }
 
-        const report = renderDocument(sourceDoc, activeConverter, false);
+        renderDocument(sourceDoc, 'none', false);
         resetHistoryToCurrent();
-        notifyAndroid('onDocumentLoaded', report.convertedCount, report.detectedSummary, false);
+        lastTrackedTextLen = (paper.textContent || '').length;
+        notifyAndroid('onDocumentLoaded', convertedCount || 0, detectedSummary || '', false);
       } catch (err) {
         notifyAndroid('onEditorError', String(err));
       }
-    },
-
-    switchConverter(converterId) {
-      if (!sourceDoc) return;
-      activeConverter = converterId || 'auto';
-      isOriginalView = false;
-      originalBanner.classList.add('hidden');
-      paper.classList.remove('read-only-original');
-      paper.setAttribute('contenteditable', 'true');
-      const report = renderDocument(sourceDoc, activeConverter, false);
-      resetHistoryToCurrent();
-      flushDraftNow();
-      notifyAndroid('onDocumentLoaded', report.convertedCount, report.detectedSummary, false);
     },
 
     setOriginalView(enabled) {
@@ -1313,7 +1628,7 @@
         originalBanner.classList.remove('hidden');
         paper.classList.add('read-only-original');
         paper.setAttribute('contenteditable', 'false');
-        renderDocument(sourceDoc, 'none', true);
+        renderDocument(originalDoc || sourceDoc, 'none', true);
       } else if (!enabled && isOriginalView) {
         isOriginalView = false;
         originalBanner.classList.add('hidden');
@@ -1323,7 +1638,7 @@
         if (savedEditableHtml !== null) {
           paper.innerHTML = savedEditableHtml;
         } else {
-          renderDocument(sourceDoc, activeConverter, false);
+          renderDocument(sourceDoc, 'none', false);
         }
       }
     },
@@ -1331,6 +1646,14 @@
     setFontSize(sizePt) {
       document.documentElement.style.setProperty('--editor-font-size', `${sizePt}pt`);
       if (virtualKbOpen) updateVirtualCaretVisual();
+    },
+
+    setZoomPercent(percent) {
+      applyDocumentZoom(Number(percent) || 100);
+    },
+
+    adjustZoomPercent(delta) {
+      applyDocumentZoom(currentZoomPercent + (Number(delta) || 0));
     },
 
     setDarkTheme(enabled) {
@@ -1415,6 +1738,7 @@
       unwrapMarksIn(paper);
       commitHistoryStep(preCaret);
       notifyAndroid('onContentDirty');
+      reportEditDelta(undefined, false);
       scheduleAutoSave();
       if (queryToKeep) {
         performSearch(queryToKeep, nextIdx);
@@ -1440,9 +1764,9 @@
         if (blockMatches.length === 0) continue;
         if (firstChangedBlockIdx === -1) firstChangedBlockIdx = b;
 
-        for (let m = blockMatches.length - 1; m >= 0; m--) {
-          const segs = blockMatches[m];
-          const marks = wrapMatchSegments(segs);
+        const blockGroups = wrapAllBlockMatches(blockMatches);
+        for (let m = 0; m < blockGroups.length; m++) {
+          const marks = blockGroups[m];
           if (marks.length > 0) {
             if (marks[0].parentNode) {
               marks[0].parentNode.replaceChild(document.createTextNode(repText), marks[0]);
@@ -1588,6 +1912,7 @@
       scrollCaretIntoSafeView(false);
       updateVirtualCaretVisual(true);
       notifyAndroid('onContentDirty');
+      reportEditDelta(undefined, false);
       scheduleAutoSave();
     },
 
@@ -1601,6 +1926,7 @@
       scrollCaretIntoSafeView(false);
       updateVirtualCaretVisual(true);
       notifyAndroid('onContentDirty');
+      reportEditDelta(undefined, false);
       scheduleAutoSave();
     },
 
@@ -1617,6 +1943,7 @@
       scrollCaretIntoSafeView(false);
       updateVirtualCaretVisual(true);
       notifyAndroid('onContentDirty');
+      reportEditDelta(undefined, false);
       scheduleAutoSave();
     },
 
@@ -1648,27 +1975,72 @@
       captureSelectionRange();
       commitHistoryStep(preCaret);
       notifyAndroid('onContentDirty');
+      reportEditDelta(undefined, false);
       scheduleAutoSave();
     },
 
-    flushDraft() {
-      flushDraftNow();
+    setExternalReadOnly(enabled) {
+      isExternalReadOnly = !!enabled;
+      if (!isOriginalView) {
+        paper.setAttribute('contenteditable', isExternalReadOnly ? 'false' : 'true');
+        if (isExternalReadOnly) {
+          hideVirtualCaret();
+          paper.blur();
+        }
+        applyInputModeState();
+      }
+    },
+
+    setMaxPasteChars(limit) {
+      const n = Number(limit);
+      if (Number.isFinite(n) && n >= 50000) maxPasteChars = Math.round(n);
+    },
+
+    markSavedClean() {
+      hasUserEdited = false;
+      lastTrackedTextLen = (paper.textContent || '').length;
+    },
+
+    trimHistoryForMemoryPressure() {
+      redoStack = [];
+      if (undoStack.length > 5) undoStack = undoStack.slice(undoStack.length - 5);
+    },
+
+    loadDocumentFromUrl(payloadUrl, convertedCount, detectedSummary, restoredFromRecovery) {
+      fetch(String(payloadUrl), { cache: 'no-store' })
+        .then((resp) => {
+          if (!resp.ok) throw new Error('HTTP ' + resp.status);
+          return resp.json();
+        })
+        .then((payload) => {
+          const uJson = JSON.stringify(payload.unicodeDoc);
+          const oJson = payload.originalDoc ? JSON.stringify(payload.originalDoc) : null;
+          global.KannadaDocEditor.loadDocument(uJson, oJson, '', convertedCount || 0, detectedSummary || '');
+          if (restoredFromRecovery) {
+            hasUserEdited = true;
+            notifyAndroid('onContentDirty');
+          }
+        })
+        .catch((err) => {
+          notifyAndroid('onEditorError', 'Failed to stream large document: ' + String(err));
+        });
+    },
+
+    flushDraft(force) {
+      flushDraftNow(!!force);
     },
 
     requestExport(exportMode, isAutoSave) {
-      let legacyFont = null;
-      const mode = String(exportMode || '');
-      const isPdfTarget = mode.endsWith('_pdf') || mode === 'share_pdf';
-      if (!isPdfTarget) {
-        if (mode.includes('nudi')) {
-          legacyFont = 'Nudi 01 e';
-        } else if (mode.includes('baraha')) {
-          legacyFont = 'BRH Kannada';
-        }
+      try {
+        const mode = String(exportMode || '');
+        const cleanClone = getCleanPaperClone();
+        const idmObj = serializeRootToIdm(cleanClone, null);
+        const idmJson = JSON.stringify(idmObj);
+        const charCount = (cleanClone.textContent || '').length;
+        notifyAndroid('onExportReady', mode, idmJson, !!isAutoSave, charCount);
+      } catch (err) {
+        notifyAndroid('onEditorError', 'Unable to prepare document for saving: ' + String(err));
       }
-      const cleanClone = getCleanPaperClone();
-      const idmJson = JSON.stringify(serializeRootToIdm(cleanClone, legacyFont));
-      notifyAndroid('onExportReady', mode, idmJson, !!isAutoSave);
     }
   };
 

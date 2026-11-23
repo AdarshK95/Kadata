@@ -2,10 +2,7 @@ package com.kannadadoc.parser
 
 import android.content.Context
 import android.net.Uri
-import java.io.BufferedInputStream
-import java.io.ByteArrayInputStream
 import java.io.InputStream
-import java.util.zip.ZipInputStream
 
 class DocumentRouter {
 
@@ -23,7 +20,8 @@ class DocumentRouter {
         private val MAGIC_JPG = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte())
         private const val SAMPLE_SIZE = 4096
 
-        const val SUPPORTED_FORMATS_LABEL = "DOC, DOCX, PDF, RTF, TXT"
+        const val GOOGLE_DOCS_MIME = "application/vnd.google-apps.document"
+        const val SUPPORTED_FORMATS_LABEL = "DOCX, DOC, PDF, ODT, RTF, TXT, HTML (incl. zipped), EPUB, Google Docs"
     }
 
     fun detectFormat(
@@ -32,6 +30,17 @@ class DocumentRouter {
         fileName: String? = null,
         mimeType: String? = null
     ): DocFormat {
+        // Virtual Google Docs from Android's Drive provider are converted on ingest,
+        // but guard here too if called directly.
+        if (mimeType.equals(GOOGLE_DOCS_MIME, ignoreCase = true)) {
+            return DocFormat.DOCX
+        }
+
+        // Local Google Drive .gdoc JSON shortcut files cannot be opened offline without Drive streaming
+        if (fileName?.endsWith(".gdoc", ignoreCase = true) == true) {
+            return DocFormat.UNSUPPORTED
+        }
+
         val headerSample = context.contentResolver.openInputStream(uri)?.use { stream ->
             readHeaderBytes(stream, SAMPLE_SIZE)
         } ?: return DocFormat.UNSUPPORTED
@@ -39,10 +48,11 @@ class DocumentRouter {
         val magicMatch = detectFromBytes(headerSample, fileName, mimeType)
 
         if (magicMatch == DocFormat.DOCX) {
-            val isRealDocx = context.contentResolver.openInputStream(uri)?.use { stream ->
-                containsDocxEntry(stream)
-            } ?: false
-            return if (isRealDocx) DocFormat.DOCX else DocFormat.UNSUPPORTED
+            // Inspect ZIP container entries to distinguish DOCX vs ODT vs EPUB vs Zipped HTML Web Page
+            val zipDocFormat = context.contentResolver.openInputStream(uri)?.use { stream ->
+                classifyZipContainer(stream)
+            } ?: DocFormat.UNSUPPORTED
+            return zipDocFormat
         }
 
         // Reject OLE2 PowerPoint (.ppt) or Excel (.xls) containers explicitly
@@ -63,16 +73,16 @@ class DocumentRouter {
         return magicMatch
     }
 
-    /**
-     * Identifies a human-friendly label for an unsupported file (e.g., "PPT", "PPTX", "XLSX", "PNG")
-     * so we can show: "This PPT format is not supported. Supported formats: DOC, DOCX, PDF, RTF, TXT".
-     */
     fun detectUnsupportedFormatLabel(
         context: Context,
         uri: Uri,
         fileName: String? = null,
         mimeType: String? = null
     ): String {
+        if (fileName?.endsWith(".gdoc", ignoreCase = true) == true) {
+            return "GDOC shortcut (open via Open File -> Google Drive instead)"
+        }
+
         val ext = fileName?.substringAfterLast('.', "")
             ?.takeIf { it.isNotBlank() && it.length <= 8 && fileName.contains('.') }
             ?.uppercase()
@@ -83,7 +93,7 @@ class DocumentRouter {
         val sample = context.contentResolver.openInputStream(uri)?.use { readHeaderBytes(it, 64) }
         if (sample != null) {
             if (startsWith(sample, MAGIC_ZIP, 0)) {
-                val zipKind = context.contentResolver.openInputStream(uri)?.use { inspectZipKind(it) }
+                val zipKind = context.contentResolver.openInputStream(uri)?.use { inspectUnsupportedZipKind(it) }
                 if (zipKind != null) return zipKind
                 return "ZIP"
             }
@@ -112,7 +122,11 @@ class DocumentRouter {
         mimeType: String? = null
     ): DocFormat {
         if (bytes.isEmpty()) {
-            return if (isTextHint(fileName, mimeType)) DocFormat.TXT else DocFormat.UNSUPPORTED
+            return when {
+                isHtmlHint(fileName, mimeType) -> DocFormat.HTML
+                isTextHint(fileName, mimeType) -> DocFormat.TXT
+                else -> DocFormat.UNSUPPORTED
+            }
         }
 
         val offset = if (
@@ -123,47 +137,77 @@ class DocumentRouter {
         ) 3 else 0
 
         return when {
-            startsWith(bytes, MAGIC_ZIP, 0) -> DocFormat.DOCX
+            startsWith(bytes, MAGIC_ZIP, 0) -> DocFormat.DOCX // Refined via classifyZipContainer
             startsWith(bytes, MAGIC_OLE2, 0) -> DocFormat.DOC
             startsWith(bytes, MAGIC_PDF, 0) -> DocFormat.PDF
             startsWith(bytes, MAGIC_RTF, offset) -> DocFormat.RTF
+            looksLikeHtml(bytes, offset, fileName, mimeType) -> DocFormat.HTML
             looksLikePlainText(bytes, offset) -> DocFormat.TXT
             else -> DocFormat.UNSUPPORTED
         }
     }
 
-    internal fun containsDocxEntry(inputStream: InputStream): Boolean {
-        return try {
-            ZipInputStream(BufferedInputStream(inputStream)).use { zis ->
-                var entry = zis.nextEntry
-                while (entry != null) {
-                    if (entry.name.equals("word/document.xml", ignoreCase = true)) {
-                        return true
+    internal fun classifyZipContainer(inputStream: InputStream): DocFormat {
+        var hasWordDoc = false
+        var hasOdtMime = false
+        var hasContentXml = false
+        var hasEpubMime = false
+        var hasContainerXml = false
+        var hasHtmlFile = false
+        var isPptOrXls = false
+
+        try {
+            SafeZipReader.inspectEntries(inputStream) { lower, isDirectory, readSample ->
+                when {
+                    lower == "word/document.xml" -> hasWordDoc = true
+                    lower.startsWith("ppt/") || lower.startsWith("xl/") || lower == "androidmanifest.xml" -> {
+                        isPptOrXls = true
+                        return@inspectEntries false
                     }
-                    entry = zis.nextEntry
+                    lower == "mimetype" -> {
+                        val mimeText = String(readSample(128), Charsets.US_ASCII).trim()
+                        if (mimeText.contains("opendocument.text", ignoreCase = true)) {
+                            hasOdtMime = true
+                        } else if (mimeText.contains("epub", ignoreCase = true)) {
+                            hasEpubMime = true
+                        }
+                    }
+                    lower == "content.xml" -> hasContentXml = true
+                    lower == "meta-inf/container.xml" -> hasContainerXml = true
+                    !isDirectory && (lower.endsWith(".html") || lower.endsWith(".htm")) -> {
+                        hasHtmlFile = true
+                    }
                 }
+                true
             }
-            false
         } catch (_: Exception) {
-            false
+            return DocFormat.UNSUPPORTED
+        }
+
+        return when {
+            isPptOrXls -> DocFormat.UNSUPPORTED
+            hasWordDoc -> DocFormat.DOCX
+            hasOdtMime -> DocFormat.ODT
+            hasEpubMime || hasContainerXml -> DocFormat.EPUB
+            hasContentXml -> DocFormat.ODT
+            hasHtmlFile -> DocFormat.HTML
+            else -> DocFormat.UNSUPPORTED
         }
     }
 
-    private fun inspectZipKind(inputStream: InputStream): String? {
+    private fun inspectUnsupportedZipKind(inputStream: InputStream): String? {
+        var found: String? = null
         return try {
-            ZipInputStream(BufferedInputStream(inputStream)).use { zis ->
-                var entry = zis.nextEntry
-                while (entry != null) {
-                    val lower = entry.name.lowercase()
-                    when {
-                        lower.startsWith("ppt/") -> return "PPTX"
-                        lower.startsWith("xl/") -> return "XLSX"
-                        lower == "androidmanifest.xml" -> return "APK"
-                    }
-                    entry = zis.nextEntry
+            SafeZipReader.inspectEntries(inputStream) { lower, _, _ ->
+                found = when {
+                    lower.startsWith("ppt/") -> "PPTX"
+                    lower.startsWith("xl/") -> "XLSX"
+                    lower == "androidmanifest.xml" -> "APK"
+                    else -> null
                 }
+                found == null
             }
-            null
+            found
         } catch (_: Exception) {
             null
         }
@@ -174,17 +218,42 @@ class DocumentRouter {
         fileName: String? = null,
         mimeType: String? = null
     ): DocFormat {
-        val allBytes = inputStream.readBytes()
-        val sample = if (allBytes.size > SAMPLE_SIZE) allBytes.copyOf(SAMPLE_SIZE) else allBytes
+        val buffered = if (inputStream is java.io.BufferedInputStream) {
+            inputStream
+        } else {
+            java.io.BufferedInputStream(inputStream, SAMPLE_SIZE + 1024)
+        }
+        val sample = BoundedStreamReader.peekHeader(buffered, SAMPLE_SIZE)
         val initial = detectFromBytes(sample, fileName, mimeType)
         if (initial == DocFormat.DOCX) {
-            return if (containsDocxEntry(ByteArrayInputStream(allBytes))) {
-                DocFormat.DOCX
-            } else {
-                DocFormat.UNSUPPORTED
-            }
+            return classifyZipContainer(buffered)
         }
         return initial
+    }
+
+    private fun looksLikeHtml(
+        bytes: ByteArray,
+        offset: Int,
+        fileName: String?,
+        mimeType: String?
+    ): Boolean {
+        if (isHtmlHint(fileName, mimeType)) return true
+        val head = String(bytes, offset, (bytes.size - offset).coerceAtMost(512), Charsets.ISO_8859_1)
+            .trimStart()
+            .lowercase()
+        return head.startsWith("<!doctype html") ||
+            head.startsWith("<html") ||
+            head.startsWith("<head") ||
+            head.startsWith("<body")
+    }
+
+    private fun isHtmlHint(fileName: String?, mimeType: String?): Boolean {
+        val lowerName = fileName?.lowercase() ?: ""
+        return mimeType.equals("text/html", ignoreCase = true) ||
+            mimeType.equals("application/xhtml+xml", ignoreCase = true) ||
+            lowerName.endsWith(".html") ||
+            lowerName.endsWith(".htm") ||
+            lowerName.endsWith(".xhtml")
     }
 
     private fun startsWith(data: ByteArray, magic: ByteArray, offset: Int): Boolean {

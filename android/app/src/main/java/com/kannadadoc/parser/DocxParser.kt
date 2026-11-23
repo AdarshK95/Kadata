@@ -5,7 +5,6 @@ import org.w3c.dom.Element
 import org.w3c.dom.Node
 import java.io.ByteArrayInputStream
 import java.io.InputStream
-import java.util.zip.ZipInputStream
 import javax.xml.parsers.DocumentBuilderFactory
 
 /**
@@ -19,6 +18,7 @@ class DocxParser {
 
     companion object {
         private const val W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        private const val MAX_CONTAINER_DEPTH = 32
     }
 
     private data class StyleDefinition(
@@ -44,35 +44,45 @@ class DocxParser {
     )
 
     fun parse(inputStream: InputStream, sourceUri: String, fileName: String): ParsedDocument {
-        val entries = readZipEntries(inputStream)
+        val entries = readZipEntries(inputStream, fileName)
         val documentBytes = entries["word/document.xml"]
             ?: error("Missing word/document.xml inside DOCX archive")
 
-        val styleCatalog = entries["word/styles.xml"]?.let { parseStyles(it) } ?: StyleCatalog()
-        val numberingFormats = entries["word/numbering.xml"]?.let { parseNumbering(it) } ?: emptyMap()
+        val warnings = mutableListOf<String>()
+
+        val styleCatalog = entries["word/styles.xml"]?.let { bytes ->
+            runCatching { parseStyles(bytes) }.getOrElse {
+                warnings.add("Document styles (styles.xml) were malformed; opened with default styling.")
+                StyleCatalog()
+            }
+        } ?: StyleCatalog()
+
+        val numberingFormats = entries["word/numbering.xml"]?.let { bytes ->
+            runCatching { parseNumberingStrict(bytes) }.getOrElse {
+                warnings.add("List numbering metadata (numbering.xml) was malformed; lists may show as standard bullets.")
+                emptyMap()
+            }
+        } ?: emptyMap()
 
         val xmlDoc = parseXml(documentBytes)
         val body = findFirstChild(xmlDoc.documentElement, "body")
-            ?: return ParsedDocument(sourceUri, fileName, DocFormat.DOCX, emptyList())
+            ?: return ParsedDocument(
+                sourceUri = sourceUri,
+                fileName = fileName,
+                sourceFormat = DocFormat.DOCX,
+                blocks = listOf(DocBlock.Paragraph(emptyList())),
+                warningMessage = "This DOCX file had an empty body element."
+            )
 
         val blocks = mutableListOf<DocBlock>()
-        var node = body.firstChild
-        while (node != null) {
-            if (node.nodeType == Node.ELEMENT_NODE) {
-                val el = node as Element
-                when (el.localName) {
-                    "p" -> blocks.add(parseParagraph(el, styleCatalog, numberingFormats))
-                    "tbl" -> blocks.add(parseTable(el, styleCatalog, numberingFormats))
-                }
-            }
-            node = node.nextSibling
-        }
+        collectBodyBlocks(body, styleCatalog, numberingFormats, blocks, depth = 0)
 
         return ParsedDocument(
             sourceUri = sourceUri,
             fileName = fileName,
             sourceFormat = DocFormat.DOCX,
-            blocks = blocks
+            blocks = blocks,
+            warningMessage = warnings.takeIf { it.isNotEmpty() }?.joinToString(" ")
         )
     }
 
@@ -100,25 +110,7 @@ class DocxParser {
         }
 
         val runs = mutableListOf<TextRun>()
-        var child = pEl.firstChild
-        while (child != null) {
-            if (child.nodeType == Node.ELEMENT_NODE) {
-                val el = child as Element
-                when (el.localName) {
-                    "r" -> extractRun(el, pStyleId, catalog)?.let { runs.add(it) }
-                    "hyperlink" -> {
-                        var hChild = el.firstChild
-                        while (hChild != null) {
-                            if (hChild.nodeType == Node.ELEMENT_NODE && (hChild as Element).localName == "r") {
-                                extractRun(hChild, pStyleId, catalog)?.let { runs.add(it) }
-                            }
-                            hChild = hChild.nextSibling
-                        }
-                    }
-                }
-            }
-            child = child.nextSibling
-        }
+        collectParagraphRuns(pEl, pStyleId, catalog, runs, depth = 0)
 
         return DocBlock.Paragraph(
             runs = mergeAdjacentRuns(runs),
@@ -128,36 +120,146 @@ class DocxParser {
         )
     }
 
+    private fun collectBodyBlocks(
+        container: Element,
+        catalog: StyleCatalog,
+        numberingFormats: Map<String, String>,
+        out: MutableList<DocBlock>,
+        depth: Int
+    ) {
+        if (depth > MAX_CONTAINER_DEPTH) return
+        var node = container.firstChild
+        while (node != null) {
+            if (node.nodeType == Node.ELEMENT_NODE) {
+                val el = node as Element
+                when (el.localName) {
+                    "p" -> out.add(parseParagraph(el, catalog, numberingFormats))
+                    "tbl" -> out.add(parseTable(el, catalog, numberingFormats, depth + 1))
+                    "sdt", "sdtContent", "customXml", "ins" -> {
+                        collectBodyBlocks(el, catalog, numberingFormats, out, depth + 1)
+                    }
+                    "del", "moveFrom" -> { /* Intentionally skip deleted tracked-changes content */ }
+                }
+            }
+            node = node.nextSibling
+        }
+    }
+
+    private fun collectParagraphRuns(
+        container: Element,
+        pStyleId: String?,
+        catalog: StyleCatalog,
+        out: MutableList<TextRun>,
+        depth: Int
+    ) {
+        if (depth > MAX_CONTAINER_DEPTH) return
+        var child = container.firstChild
+        while (child != null) {
+            if (child.nodeType == Node.ELEMENT_NODE) {
+                val el = child as Element
+                when (el.localName) {
+                    "r" -> extractRun(el, pStyleId, catalog)?.let { out.add(it) }
+                    "hyperlink", "sdt", "sdtContent", "ins", "smartTag", "fldSimple", "customXml" -> {
+                        collectParagraphRuns(el, pStyleId, catalog, out, depth + 1)
+                    }
+                    "del", "moveFrom", "proofErr", "pPr", "sdtPr" -> { /* Skip non-content / deleted nodes */ }
+                }
+            }
+            child = child.nextSibling
+        }
+    }
+
     private fun parseTable(
         tblEl: Element,
         catalog: StyleCatalog,
-        numberingFormats: Map<String, String>
+        numberingFormats: Map<String, String>,
+        depth: Int = 0
     ): DocBlock.Table {
         val rows = mutableListOf<List<List<DocBlock.Paragraph>>>()
-        var trNode = tblEl.firstChild
-        while (trNode != null) {
-            if (trNode.nodeType == Node.ELEMENT_NODE && (trNode as Element).localName == "tr") {
-                val cells = mutableListOf<List<DocBlock.Paragraph>>()
-                var tcNode = trNode.firstChild
-                while (tcNode != null) {
-                    if (tcNode.nodeType == Node.ELEMENT_NODE && (tcNode as Element).localName == "tc") {
-                        val cellParagraphs = mutableListOf<DocBlock.Paragraph>()
-                        var pNode = tcNode.firstChild
-                        while (pNode != null) {
-                            if (pNode.nodeType == Node.ELEMENT_NODE && (pNode as Element).localName == "p") {
-                                cellParagraphs.add(parseParagraph(pNode, catalog, numberingFormats))
-                            }
-                            pNode = pNode.nextSibling
-                        }
-                        cells.add(cellParagraphs)
-                    }
-                    tcNode = tcNode.nextSibling
-                }
-                if (cells.isNotEmpty()) rows.add(cells)
-            }
-            trNode = trNode.nextSibling
-        }
+        collectTableRows(tblEl, catalog, numberingFormats, rows, depth)
         return DocBlock.Table(rows = rows)
+    }
+
+    private fun collectTableRows(
+        container: Element,
+        catalog: StyleCatalog,
+        numberingFormats: Map<String, String>,
+        outRows: MutableList<List<List<DocBlock.Paragraph>>>,
+        depth: Int
+    ) {
+        if (depth > MAX_CONTAINER_DEPTH) return
+        var node = container.firstChild
+        while (node != null) {
+            if (node.nodeType == Node.ELEMENT_NODE) {
+                val el = node as Element
+                when (el.localName) {
+                    "tr" -> {
+                        val cells = mutableListOf<List<DocBlock.Paragraph>>()
+                        collectRowCells(el, catalog, numberingFormats, cells, depth + 1)
+                        if (cells.isNotEmpty()) outRows.add(cells)
+                    }
+                    "sdt", "sdtContent", "customXml", "ins" -> {
+                        collectTableRows(el, catalog, numberingFormats, outRows, depth + 1)
+                    }
+                }
+            }
+            node = node.nextSibling
+        }
+    }
+
+    private fun collectRowCells(
+        container: Element,
+        catalog: StyleCatalog,
+        numberingFormats: Map<String, String>,
+        outCells: MutableList<List<DocBlock.Paragraph>>,
+        depth: Int
+    ) {
+        if (depth > MAX_CONTAINER_DEPTH) return
+        var node = container.firstChild
+        while (node != null) {
+            if (node.nodeType == Node.ELEMENT_NODE) {
+                val el = node as Element
+                when (el.localName) {
+                    "tc" -> {
+                        val cellParagraphs = mutableListOf<DocBlock.Paragraph>()
+                        collectCellParagraphs(el, catalog, numberingFormats, cellParagraphs, depth + 1)
+                        outCells.add(cellParagraphs)
+                    }
+                    "sdt", "sdtContent", "customXml", "ins" -> {
+                        collectRowCells(el, catalog, numberingFormats, outCells, depth + 1)
+                    }
+                }
+            }
+            node = node.nextSibling
+        }
+    }
+
+    private fun collectCellParagraphs(
+        container: Element,
+        catalog: StyleCatalog,
+        numberingFormats: Map<String, String>,
+        outParas: MutableList<DocBlock.Paragraph>,
+        depth: Int
+    ) {
+        if (depth > MAX_CONTAINER_DEPTH) return
+        var node = container.firstChild
+        while (node != null) {
+            if (node.nodeType == Node.ELEMENT_NODE) {
+                val el = node as Element
+                when (el.localName) {
+                    "p" -> outParas.add(parseParagraph(el, catalog, numberingFormats))
+                    "tbl" -> {
+                        val nested = parseTable(el, catalog, numberingFormats, depth + 1)
+                        outParas.addAll(TableFlattenHelper.flattenNestedTableToParagraphs(nested.rows))
+                    }
+                    "sdt", "sdtContent", "customXml", "ins" -> {
+                        collectCellParagraphs(el, catalog, numberingFormats, outParas, depth + 1)
+                    }
+                    "del", "moveFrom", "tcPr", "sdtPr" -> { /* Skip properties and deleted tracked content */ }
+                }
+            }
+            node = node.nextSibling
+        }
     }
 
     private fun extractRun(
@@ -284,8 +386,7 @@ class DocxParser {
         )
     }
 
-    private fun parseNumbering(bytes: ByteArray): Map<String, String> {
-        return try {
+    private fun parseNumberingStrict(bytes: ByteArray): Map<String, String> {
             val doc = parseXml(bytes)
             val root = doc.documentElement
             val abstractFormats = mutableMapOf<String, String>()
@@ -321,10 +422,7 @@ class DocxParser {
                 }
                 node = node.nextSibling
             }
-            numIdToFormat
-        } catch (_: Exception) {
-            emptyMap()
-        }
+            return numIdToFormat
     }
 
     private fun <T> resolveStyleProperty(
@@ -422,24 +520,21 @@ class DocxParser {
         return merged
     }
 
-    private fun readZipEntries(inputStream: InputStream): Map<String, ByteArray> {
-        val map = mutableMapOf<String, ByteArray>()
-        ZipInputStream(inputStream).use { zis ->
-            var entry = zis.nextEntry
-            while (entry != null) {
-                val name = entry.name.lowercase()
-                if (name == "word/document.xml" || name == "word/styles.xml" || name == "word/numbering.xml") {
-                    map[name] = zis.readBytes()
-                }
-                entry = zis.nextEntry
-            }
+    private fun readZipEntries(inputStream: InputStream, fileName: String): Map<String, ByteArray> {
+        return SafeZipReader.readMatchingEntries(
+            inputStream = inputStream,
+            fileName = fileName,
+            formatLabel = "DOCX"
+        ) { norm ->
+            norm == "word/document.xml" || norm == "word/styles.xml" || norm == "word/numbering.xml"
         }
-        return map
     }
 
     private fun parseXml(bytes: ByteArray): Document {
         val factory = DocumentBuilderFactory.newInstance().apply {
             isNamespaceAware = true
+            runCatching { setFeature("http://xml.org/sax/features/external-general-entities", false) }
+            runCatching { setFeature("http://xml.org/sax/features/external-parameter-entities", false) }
         }
         return factory.newDocumentBuilder().parse(ByteArrayInputStream(bytes))
     }

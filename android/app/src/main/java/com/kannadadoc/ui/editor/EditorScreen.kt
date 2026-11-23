@@ -11,11 +11,14 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebViewClient
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -29,6 +32,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.WindowInsets
@@ -56,7 +60,9 @@ import androidx.compose.material.icons.filled.FormatItalic
 import androidx.compose.material.icons.filled.FormatListNumbered
 import androidx.compose.material.icons.filled.FormatSize
 import androidx.compose.material.icons.filled.FormatUnderlined
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MoreVert
@@ -69,6 +75,8 @@ import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.TextDecrease
 import androidx.compose.material.icons.filled.TextIncrease
 import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.ZoomIn
+import androidx.compose.material.icons.filled.ZoomOut
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -101,12 +109,15 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.movableContentOf
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.focus.FocusRequester
@@ -129,19 +140,47 @@ import com.kannadadoc.data.local.DefaultSaveFormat
 import com.kannadadoc.data.local.UserSettings
 import com.kannadadoc.export.ShareHelper
 import com.kannadadoc.ui.common.AboutKadataDialog
+import com.kannadadoc.data.local.RevisionEntity
+import com.kannadadoc.data.storage.FileRenamePolicy
+import com.kannadadoc.ui.common.CreateDocumentRequest
+import com.kannadadoc.ui.common.CreateDocumentWithMimeContract
+import kotlinx.coroutines.flow.SharedFlow
+import java.io.ByteArrayInputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import com.kannadadoc.ui.common.TwoStepFormatExportDialog
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONObject
+
+private enum class PendingDirtyAction {
+    SHARE_AS_IS,
+    SHARE_DIFFERENT_FORMAT,
+    CHANGE_DOCUMENT_TYPE
+}
+
+private data class DirtyActionPromptCopy(
+    val titleEn: String,
+    val titleKn: String,
+    val bodyEn: String,
+    val bodyKn: String,
+    val btnEn: String,
+    val btnKn: String,
+    val savingEn: String,
+    val savingKn: String
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun EditorScreen(
     viewModel: EditorViewModel,
     userSettings: UserSettings,
+    memoryPressureEvents: SharedFlow<Int>,
     onThemeModeChange: (AppThemeMode) -> Unit,
     onSaveFormatChange: (DefaultSaveFormat) -> Unit,
     onAutoSaveIntervalChange: (Int) -> Unit,
+    onBreakReminderChange: (Int) -> Unit,
     onBlockAutoKeyboardChange: (Boolean) -> Unit,
     onDefaultFontSizeChange: (Int) -> Unit,
     onBack: () -> Unit
@@ -169,6 +208,7 @@ fun EditorScreen(
     var showChangeDocTypeDialog by remember { mutableStateOf(false) }
     var pendingConvertTarget by remember { mutableStateOf<KannadaEncodingChoice?>(null) }
     var showKannadaKeyboard by remember { mutableStateOf(false) }
+    var zoomPercent by remember { mutableIntStateOf(100) }
     var keyboardAnchor by remember { mutableStateOf(KeyboardAnchor.BOTTOM_LEFT) }
 
     // Two-step export / share different format dialog state
@@ -177,6 +217,15 @@ fun EditorScreen(
 
     // Mutation confirmation dialog states
     var showConfirmReplaceAll by remember { mutableStateOf(false) }
+    var showUnsavedExitDialog by remember { mutableStateOf(false) }
+    var exitAfterSavePending by remember { mutableStateOf(false) }
+    var pendingActionAfterSave by remember { mutableStateOf<PendingDirtyAction?>(null) }
+    var pendingDirtyActionPrompt by remember { mutableStateOf<PendingDirtyAction?>(null) }
+    var showExternalReadOnlySaveDialog by remember { mutableStateOf(false) }
+    var showVersionsDialog by remember { mutableStateOf(false) }
+    var versionSaveNameDraft by remember { mutableStateOf("") }
+    var webViewInstanceGeneration by remember { mutableIntStateOf(0) }
+    var webViewCrashCount by remember { mutableIntStateOf(0) }
 
     // Find & Replace UI state
     var showFindBar by remember { mutableStateOf(false) }
@@ -187,17 +236,9 @@ fun EditorScreen(
     var currentMatchIdx by remember { mutableIntStateOf(0) }
     var totalMatches by remember { mutableIntStateOf(0) }
 
-    // Separate SAF CreateDocument launchers for .doc, .docx, and .pdf
-    val createDocxLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument(TargetFileType.DOCX.mimeType)
-    ) { uri -> uri?.let { viewModel.writePendingSafCopy(it) } }
-
-    val createDocLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument(TargetFileType.DOC.mimeType)
-    ) { uri -> uri?.let { viewModel.writePendingSafCopy(it) } }
-
-    val createPdfLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument(TargetFileType.PDF.mimeType)
+    // Unified SAF CreateDocument launcher supporting all 9 export formats & MIME types
+    val createDocumentLauncher = rememberLauncherForActivityResult(
+        CreateDocumentWithMimeContract()
     ) { uri -> uri?.let { viewModel.writePendingSafCopy(it) } }
 
     LaunchedEffect(uiState.statusMessage) {
@@ -255,9 +296,65 @@ fun EditorScreen(
         }
     }
 
-    // Configurable Auto-Save file timer (default 10 minutes) — saves automatically when dirty
-    LaunchedEffect(isWebReady, uiState.isDirty, uiState.isOriginalView, userSettings.autoSaveIntervalMinutes, userSettings.defaultSaveFormat) {
-        if (isWebReady && uiState.isDirty && !uiState.isOriginalView) {
+    val latestIsDirty by rememberUpdatedState(uiState.isDirty)
+    val latestIsSaving by rememberUpdatedState(uiState.isSaving)
+    val latestIsExternalReadOnly by rememberUpdatedState(uiState.isExternalReadOnly)
+    val latestDefaultSaveMode by rememberUpdatedState(userSettings.defaultSaveFormat.jsExportMode)
+
+    // System Back & Top-Bar Back share the exact same unsaved-changes guard
+    fun requestNavigateBack() {
+        if (latestIsSaving) {
+            coroutineScope.launch {
+                snackbarHostState.showSnackbar(
+                    if (knOnly) "ಉಳಿಸಲಾಗುತ್ತಿದೆ, ದಯವಿಟ್ಟು ನಿರೀಕ್ಷಿಸಿ..." else "Saving in progress, please wait..."
+                )
+            }
+            return
+        }
+        if (latestIsDirty && !latestIsExternalReadOnly) {
+            showUnsavedExitDialog = true
+            return
+        }
+        webViewRef?.evaluateJavascript("window.KannadaDocEditor && window.KannadaDocEditor.setVirtualKeyboardMode(false, false, 0);", null)
+        webViewRef?.evaluateJavascript("window.KannadaDocEditor && window.KannadaDocEditor.clearSearch();", null)
+        onBack()
+    }
+
+    BackHandler(enabled = true) {
+        requestNavigateBack()
+    }
+
+    // Sync External Read-Only lock state to WebView
+    LaunchedEffect(isWebReady, uiState.isExternalReadOnly) {
+        if (isWebReady) {
+            webViewRef?.evaluateJavascript(
+                "window.KannadaDocEditor && window.KannadaDocEditor.setExternalReadOnly(${uiState.isExternalReadOnly});",
+                null
+            )
+        }
+    }
+
+    // Notify WebView whenever a canonical save succeeds so JS resets dirty tracking cleanly
+    LaunchedEffect(isWebReady, uiState.saveGeneration) {
+        if (isWebReady && uiState.saveGeneration > 0) {
+            webViewRef?.evaluateJavascript(
+                "window.KannadaDocEditor && window.KannadaDocEditor.markSavedClean();",
+                null
+            )
+        }
+    }
+
+    // Sliding Time-Based Auto-Save (default 5 minutes; resets on every saveGeneration!)
+    LaunchedEffect(
+        isWebReady,
+        uiState.isDirty,
+        uiState.isOriginalView,
+        uiState.isExternalReadOnly,
+        uiState.saveGeneration,
+        userSettings.autoSaveIntervalMinutes,
+        userSettings.defaultSaveFormat
+    ) {
+        if (isWebReady && uiState.isDirty && !uiState.isOriginalView && !uiState.isExternalReadOnly) {
             val intervalMs = userSettings.autoSaveIntervalMinutes.coerceAtLeast(1) * 60_000L
             delay(intervalMs)
             webViewRef?.evaluateJavascript(
@@ -267,31 +364,82 @@ fun EditorScreen(
         }
     }
 
+    // Change-Magnitude Auto-Save (>= 500 cumulative chars or >= 300-char paste -> wait 5s idle -> save & reset timer)
+    LaunchedEffect(uiState.magnitudeAutoSaveSignal) {
+        if (uiState.magnitudeAutoSaveSignal > 0 && isWebReady && uiState.isDirty && !uiState.isOriginalView && !uiState.isExternalReadOnly) {
+            delay(5_000L)
+            if (latestIsDirty && !latestIsSaving && !latestIsExternalReadOnly) {
+                webViewRef?.evaluateJavascript(
+                    "window.KannadaDocEditor && window.KannadaDocEditor.requestExport('$latestDefaultSaveMode', true);",
+                    null
+                )
+            }
+        }
+    }
+
+
+    // OS Memory Pressure Hook: flush AutoRecover checkpoint & trim JS undo stack immediately
+    LaunchedEffect(memoryPressureEvents, isWebReady) {
+        memoryPressureEvents.collect {
+            if (isWebReady) {
+                if (latestIsDirty && !latestIsExternalReadOnly) {
+                    webViewRef?.evaluateJavascript("window.KannadaDocEditor && window.KannadaDocEditor.flushDraft(true);", null)
+                }
+                webViewRef?.evaluateJavascript("window.KannadaDocEditor && window.KannadaDocEditor.trimHistoryForMemoryPressure();", null)
+            }
+        }
+    }
+
+    // Background / Lock-Screen Protection: ONLY flush & auto-save when actually dirty
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_PAUSE) {
-                webViewRef?.evaluateJavascript("window.KannadaDocEditor && window.KannadaDocEditor.flushDraft();", null)
+            if ((event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) &&
+                latestIsDirty && !latestIsExternalReadOnly
+            ) {
+                webViewRef?.evaluateJavascript("window.KannadaDocEditor && window.KannadaDocEditor.flushDraft(true);", null)
+                if (event == Lifecycle.Event.ON_STOP && !latestIsSaving) {
+                    webViewRef?.evaluateJavascript(
+                        "window.KannadaDocEditor && window.KannadaDocEditor.requestExport('$latestDefaultSaveMode', true);",
+                        null
+                    )
+                }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    LaunchedEffect(isWebReady, uiState.uriString, uiState.parsedDocJson) {
+    // Document Injection: uses direct JS call for normal docs, and local asset URL streaming for >256 KB docs (OOM-safe)
+    LaunchedEffect(isWebReady, uiState.docPayloadGeneration, webViewInstanceGeneration) {
         val json = uiState.parsedDocJson
-        val docKey = "${uiState.uriString}:${json?.hashCode()}"
+        val docKey = "${uiState.docPayloadGeneration}:$webViewInstanceGeneration"
         if (isWebReady && json != null && lastInjectedKey != docKey) {
             lastInjectedKey = docKey
-            val jsDocArg = JSONObject.quote(json)
-            val jsConvArg = JSONObject.quote(uiState.activeConverter)
-            val jsDraftArg = JSONObject.quote(uiState.savedDraftHtml ?: "")
-            webViewRef?.evaluateJavascript(
+            val safePasteLimit = viewModel.computeSafeMaxPasteChars()
+            val jsSummaryArg = JSONObject.quote(uiState.initialDetectedSummary)
+            val initSettingsScript =
                 "window.KannadaDocEditor.setDarkTheme($isDarkTheme);" +
                     "window.KannadaDocEditor.setManualKeyboardBlock(${userSettings.blockAutoKeyboard});" +
                     "window.KannadaDocEditor.setFontSize(${uiState.fontSizePt});" +
-                    "window.KannadaDocEditor.loadDocument($jsDocArg, $jsConvArg, $jsDraftArg);",
-                null
-            )
+                    "window.KannadaDocEditor.setExternalReadOnly(${uiState.isExternalReadOnly});" +
+                    "window.KannadaDocEditor.setMaxPasteChars($safePasteLimit);"
+
+            if (uiState.useUrlPayloadTransfer && viewModel.getPendingWebPayloadBytes() != null) {
+                val payloadUrl = "https://appassets.androidplatform.net/kadata-doc/payload.json?gen=${uiState.docPayloadGeneration}"
+                webViewRef?.evaluateJavascript(
+                    initSettingsScript +
+                        "window.KannadaDocEditor.loadDocumentFromUrl(${JSONObject.quote(payloadUrl)}, ${uiState.initialConvertedRuns}, $jsSummaryArg, ${uiState.restoredFromRecovery});",
+                    null
+                )
+            } else {
+                val jsUnicodeArg = JSONObject.quote(json)
+                val jsOriginalArg = uiState.originalDocJson?.let { JSONObject.quote(it) } ?: "null"
+                webViewRef?.evaluateJavascript(
+                    initSettingsScript +
+                        "window.KannadaDocEditor.loadDocument($jsUnicodeArg, $jsOriginalArg, '', ${uiState.initialConvertedRuns}, $jsSummaryArg);",
+                    null
+                )
+            }
         }
     }
 
@@ -331,12 +479,7 @@ fun EditorScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                     IconButton(
-                        onClick = {
-                            execJs("window.KannadaDocEditor && window.KannadaDocEditor.setVirtualKeyboardMode(false, false, 0);")
-                            execJs("window.KannadaDocEditor && window.KannadaDocEditor.clearSearch();")
-                            execJs("window.KannadaDocEditor && window.KannadaDocEditor.flushDraft();")
-                            onBack()
-                        },
+                        onClick = { requestNavigateBack() },
                         modifier = Modifier.size(40.dp)
                     ) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", modifier = Modifier.size(22.dp))
@@ -356,19 +499,25 @@ fun EditorScreen(
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false)
                         )
-                        IconButton(
-                            onClick = {
-                                renameDraftText = uiState.documentTitle.ifBlank { "Untitled.docx" }
-                                showRenameDialog = true
-                            },
-                            modifier = Modifier.size(32.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Edit,
-                                contentDescription = if (knOnly) "ಹೆಸರು ಬದಲಿಸಿ" else "Rename file",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(17.dp)
-                            )
+                        val canRenameCurrent = FileRenamePolicy.isKadataOwnedRenamableUri(
+                            uiState.uriString,
+                            context.packageName
+                        ) && !uiState.isExternalReadOnly && !uiState.isLoading && uiState.loadErrorMessage == null
+                        if (canRenameCurrent) {
+                            IconButton(
+                                onClick = {
+                                    renameDraftText = uiState.documentTitle.ifBlank { "Untitled.docx" }
+                                    showRenameDialog = true
+                                },
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Edit,
+                                    contentDescription = if (knOnly) "ಹೆಸರು ಬದಲಿಸಿ" else "Rename file",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(17.dp)
+                                )
+                            }
                         }
                     }
                     // Icon-only Save button (green when saved/clean, grey when edited/dirty)
@@ -376,11 +525,15 @@ fun EditorScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         IconButton(
                             onClick = {
-                                execJs(
-                                    "window.KannadaDocEditor.requestExport('${userSettings.defaultSaveFormat.jsExportMode}', false);"
-                                )
+                                if (uiState.isExternalReadOnly) {
+                                    showExternalReadOnlySaveDialog = true
+                                } else {
+                                    execJs(
+                                        "window.KannadaDocEditor.requestExport('${userSettings.defaultSaveFormat.jsExportMode}', false);"
+                                    )
+                                }
                             },
-                            enabled = !uiState.isSaving && !uiState.isOriginalView
+                            enabled = !uiState.isSaving && !uiState.isOriginalView && uiState.loadErrorMessage == null
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Save,
@@ -406,16 +559,26 @@ fun EditorScreen(
                         IconButton(onClick = { showOverflowMenu = true }) {
                             Icon(Icons.Default.MoreVert, contentDescription = "More options")
                         }
+                        val compactMenuPadding = PaddingValues(horizontal = 14.dp, vertical = 2.dp)
+                        val compactItemModifier = Modifier.heightIn(min = 40.dp)
                         DropdownMenu(
                             expanded = showOverflowMenu,
                             onDismissRequest = { showOverflowMenu = false },
-                            containerColor = if (isDarkTheme) Color.Black else MaterialTheme.colorScheme.surface
+                            containerColor = if (isDarkTheme) Color.Black else MaterialTheme.colorScheme.surface,
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)),
+                            shadowElevation = 8.dp
                         ) {
                             DropdownMenuItem(
                                 text = {
-                                    Text(if (knOnly) "ಹುಡುಕಿ / ಬದಲಿಸಿ" else "Find & Replace • ಹುಡುಕಿ / ಬದಲಿಸಿ")
+                                    Text(
+                                        text = if (knOnly) "ಹುಡುಕಿ / ಬದಲಿಸಿ" else "Find & Replace • ಹುಡುಕಿ / ಬದಲಿಸಿ",
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
                                 },
-                                leadingIcon = { Icon(Icons.Default.FindReplace, null) },
+                                leadingIcon = { Icon(Icons.Default.FindReplace, null, modifier = Modifier.size(20.dp)) },
+                                contentPadding = compactMenuPadding,
+                                modifier = compactItemModifier,
                                 onClick = {
                                     showOverflowMenu = false
                                     showFindBar = true
@@ -423,32 +586,58 @@ fun EditorScreen(
                                 }
                             )
                             HorizontalDivider()
-                            // Clean 3-option Share / Save menu
                             DropdownMenuItem(
-                                text = { Text(if (knOnly) "ಹಂಚಿಕೊಳ್ಳಿ" else "Share • ಹಂಚಿಕೊಳ್ಳಿ") },
-                                leadingIcon = { Icon(Icons.Default.Share, null) },
+                                text = {
+                                    Text(
+                                        text = if (knOnly) "ಹಂಚಿಕೊಳ್ಳಿ" else "Share • ಹಂಚಿಕೊಳ್ಳಿ",
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                },
+                                leadingIcon = { Icon(Icons.Default.Share, null, modifier = Modifier.size(20.dp)) },
+                                contentPadding = compactMenuPadding,
+                                modifier = compactItemModifier,
                                 onClick = {
                                     showOverflowMenu = false
-                                    viewModel.shareExistingFileAsIs()
+                                    if (uiState.isDirty && !uiState.isExternalReadOnly && !uiState.isOriginalView) {
+                                        pendingDirtyActionPrompt = PendingDirtyAction.SHARE_AS_IS
+                                    } else {
+                                        viewModel.shareExistingFileAsIs()
+                                    }
                                 }
                             )
                             DropdownMenuItem(
                                 text = {
                                     Text(
-                                        if (knOnly) "ಬೇರೆ ಫಾರ್ಮ್ಯಾಟ್ ಹಂಚಿಕೊಳ್ಳಿ"
-                                        else "Share Different Format"
+                                        text = if (knOnly) "ಬೇರೆ ಫಾರ್ಮ್ಯಾಟ್ ಹಂಚಿಕೊಳ್ಳಿ" else "Share Different Format",
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 },
-                                leadingIcon = { Icon(Icons.Default.Share, null) },
+                                leadingIcon = { Icon(Icons.Default.Share, null, modifier = Modifier.size(20.dp)) },
+                                contentPadding = compactMenuPadding,
+                                modifier = compactItemModifier,
                                 onClick = {
                                     showOverflowMenu = false
-                                    chosenEncoding = null
-                                    pendingExportAction = ExportAction.SHARE_DIFFERENT
+                                    if (uiState.isDirty && !uiState.isExternalReadOnly && !uiState.isOriginalView) {
+                                        pendingDirtyActionPrompt = PendingDirtyAction.SHARE_DIFFERENT_FORMAT
+                                    } else {
+                                        chosenEncoding = null
+                                        pendingExportAction = ExportAction.SHARE_DIFFERENT
+                                    }
                                 }
                             )
                             DropdownMenuItem(
-                                text = { Text(if (knOnly) "ಪ್ರತಿ ಉಳಿಸಿ" else "Save a Copy • ಪ್ರತಿ ಉಳಿಸಿ") },
-                                leadingIcon = { Icon(Icons.Default.Save, null) },
+                                text = {
+                                    Text(
+                                        text = if (knOnly) "ಪ್ರತಿ ಉಳಿಸಿ" else "Save a Copy • ಪ್ರತಿ ಉಳಿಸಿ",
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                },
+                                leadingIcon = { Icon(Icons.Default.Save, null, modifier = Modifier.size(20.dp)) },
+                                contentPadding = compactMenuPadding,
+                                modifier = compactItemModifier,
                                 onClick = {
                                     showOverflowMenu = false
                                     chosenEncoding = null
@@ -458,66 +647,116 @@ fun EditorScreen(
                             DropdownMenuItem(
                                 text = {
                                     Text(
-                                        if (knOnly) "ದಾಖಲೆ ಫಾರ್ಮ್ಯಾಟ್ ಬದಲಿಸಿ"
-                                        else "Change Document Type"
+                                        text = if (knOnly) "ದಾಖಲೆ ಫಾರ್ಮ್ಯಾಟ್ ಬದಲಿಸಿ" else "Change Document Type",
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 },
-                                leadingIcon = { Icon(Icons.Default.SwapHoriz, null) },
+                                leadingIcon = { Icon(Icons.Default.SwapHoriz, null, modifier = Modifier.size(20.dp)) },
+                                contentPadding = compactMenuPadding,
+                                modifier = compactItemModifier,
                                 onClick = {
                                     showOverflowMenu = false
-                                    showChangeDocTypeDialog = true
+                                    if (uiState.isDirty && !uiState.isExternalReadOnly && !uiState.isOriginalView) {
+                                        pendingDirtyActionPrompt = PendingDirtyAction.CHANGE_DOCUMENT_TYPE
+                                    } else {
+                                        showChangeDocTypeDialog = true
+                                    }
                                 }
                             )
                             HorizontalDivider()
                             DropdownMenuItem(
                                 text = {
                                     Text(
-                                        if (uiState.showFormattingStrip) {
+                                        text = if (uiState.showFormattingStrip) {
                                             if (knOnly) "ಫಾರ್ಮ್ಯಾಟ್ ಪಟ್ಟಿ ಮರೆಮಾಡಿ" else "Hide Formatting Bar"
                                         } else {
                                             if (knOnly) "ಫಾರ್ಮ್ಯಾಟ್ ಪಟ್ಟಿ ತೋರಿಸಿ" else "Show Formatting Bar"
-                                        }
+                                        },
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 },
-                                leadingIcon = { Icon(Icons.Default.FormatSize, null) },
+                                leadingIcon = { Icon(Icons.Default.FormatSize, null, modifier = Modifier.size(20.dp)) },
+                                contentPadding = compactMenuPadding,
+                                modifier = compactItemModifier,
                                 onClick = {
                                     showOverflowMenu = false
                                     viewModel.toggleFormattingStrip()
                                 }
                             )
+                            if (uiState.initialConvertedRuns > 0 || uiState.isOriginalView) {
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            text = if (uiState.isOriginalView) {
+                                                if (knOnly) "ತಿದ್ದುಪಡಿ ಮೋಡ್‌ಗೆ ಹಿಂತಿರುಗಿ" else "Back to Editable Kannada"
+                                            } else {
+                                                if (knOnly) "ಪರಿವರ್ತನೆ ಪೂರ್ವ ಮೂಲ ಪಠ್ಯ (ಓದಲು ಮಾತ್ರ)" else "View Raw Pre-Conversion (Read-Only)"
+                                            },
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    },
+                                    leadingIcon = { Icon(Icons.Default.Visibility, null, modifier = Modifier.size(20.dp)) },
+                                    contentPadding = compactMenuPadding,
+                                    modifier = compactItemModifier,
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        val next = !uiState.isOriginalView
+                                        if (next && showKannadaKeyboard) {
+                                            showKannadaKeyboard = false
+                                            execJs("window.KannadaDocEditor.setVirtualKeyboardMode(false, false, 0);")
+                                        }
+                                        viewModel.setOriginalView(next)
+                                        execJs("window.KannadaDocEditor.setOriginalView($next);")
+                                    }
+                                )
+                            }
                             DropdownMenuItem(
                                 text = {
                                     Text(
-                                        if (uiState.isOriginalView) {
-                                            if (knOnly) "ತಿದ್ದುಪಡಿ ಮೋಡ್‌ಗೆ ಹಿಂತಿರುಗಿ" else "Back to Editable Kannada"
-                                        } else {
-                                            if (knOnly) "ಮೂಲ ದಾಖಲೆ ನೋಡಿ (ಓದಲು ಮಾತ್ರ)" else "View Original Document (Read-Only)"
-                                        }
+                                        text = if (knOnly) "ಫೈಲ್ ಆವೃತ್ತಿಗಳು" else "File Versions • ಆವೃತ್ತಿಗಳು",
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 },
-                                leadingIcon = { Icon(Icons.Default.Visibility, null) },
+                                leadingIcon = { Icon(Icons.Default.History, null, modifier = Modifier.size(20.dp)) },
+                                contentPadding = compactMenuPadding,
+                                modifier = compactItemModifier,
                                 onClick = {
                                     showOverflowMenu = false
-                                    val next = !uiState.isOriginalView
-                                    if (next && showKannadaKeyboard) {
-                                        showKannadaKeyboard = false
-                                        execJs("window.KannadaDocEditor.setVirtualKeyboardMode(false, false, 0);")
-                                    }
-                                    viewModel.setOriginalView(next)
-                                    execJs("window.KannadaDocEditor.setOriginalView($next);")
+                                    viewModel.loadDocumentVersions()
+                                    showVersionsDialog = true
                                 }
                             )
                             DropdownMenuItem(
-                                text = { Text(if (knOnly) "ಸೆಟ್ಟಿಂಗ್‌ಗಳು" else "Settings • ಸೆಟ್ಟಿಂಗ್‌ಗಳು") },
-                                leadingIcon = { Icon(Icons.Default.Settings, null) },
+                                text = {
+                                    Text(
+                                        text = if (knOnly) "ಸೆಟ್ಟಿಂಗ್‌ಗಳು" else "Settings • ಸೆಟ್ಟಿಂಗ್‌ಗಳು",
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                },
+                                leadingIcon = { Icon(Icons.Default.Settings, null, modifier = Modifier.size(20.dp)) },
+                                contentPadding = compactMenuPadding,
+                                modifier = compactItemModifier,
                                 onClick = {
                                     showOverflowMenu = false
                                     showSettingsDialog = true
                                 }
                             )
                             DropdownMenuItem(
-                                text = { Text(if (knOnly) "ಪ್ರಿಂಟ್ ಮಾಡಿ" else "Print Document") },
-                                leadingIcon = { Icon(Icons.Default.Print, null) },
+                                text = {
+                                    Text(
+                                        text = if (knOnly) "ಪ್ರಿಂಟ್ ಮಾಡಿ" else "Print Document",
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                },
+                                leadingIcon = { Icon(Icons.Default.Print, null, modifier = Modifier.size(20.dp)) },
+                                contentPadding = compactMenuPadding,
+                                modifier = compactItemModifier,
                                 onClick = {
                                     showOverflowMenu = false
                                     webViewRef?.let { wv ->
@@ -526,21 +765,31 @@ fun EditorScreen(
                                 }
                             )
                             DropdownMenuItem(
-                                text = { Text(if (knOnly) "ಆಪ್ ಬಗ್ಗೆ" else "About App • ಆಪ್ ಬಗ್ಗೆ") },
-                                leadingIcon = { Icon(Icons.Default.Info, null) },
+                                text = {
+                                    Text(
+                                        text = if (knOnly) "ಆಪ್ ಬಗ್ಗೆ" else "About App • ಆಪ್ ಬಗ್ಗೆ",
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                },
+                                leadingIcon = { Icon(Icons.Default.Info, null, modifier = Modifier.size(20.dp)) },
+                                contentPadding = compactMenuPadding,
+                                modifier = compactItemModifier,
                                 onClick = {
                                     showOverflowMenu = false
                                     showAboutDialog = true
                                 }
                             )
                             HorizontalDivider()
-                            // Document Information stays at the very bottom below Print Document
+                            // Document Information stays cleanly visible at the bottom with compact height
                             DropdownMenuItem(
                                 text = {
-                                    Column {
+                                    Column(modifier = Modifier.padding(vertical = 2.dp)) {
                                         Text(
-                                            text = if (knOnly) "ದಾಖಲೆ ಮಾಹಿತಿ" else "Document Information • ದಾಖಲೆ ಮಾಹಿತಿ",
-                                            style = MaterialTheme.typography.bodyLarge
+                                            text = if (knOnly) "ದಾಖಲೆ ಮಾಹಿತಿ" else "Document Info • ದಾಖಲೆ ಮಾಹಿತಿ",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
                                         )
                                         Text(
                                             text = "${uiState.documentInfo.detectedEncodingLabel} • ${uiState.documentInfo.fileFormat.badgeLabel}",
@@ -551,7 +800,9 @@ fun EditorScreen(
                                         )
                                     }
                                 },
-                                leadingIcon = { Icon(Icons.Default.Info, null) },
+                                leadingIcon = { Icon(Icons.Default.Info, null, modifier = Modifier.size(20.dp)) },
+                                contentPadding = compactMenuPadding,
+                                modifier = Modifier.heightIn(min = 46.dp),
                                 onClick = {
                                     showOverflowMenu = false
                                     showDocInfoDialog = true
@@ -567,17 +818,36 @@ fun EditorScreen(
         snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { padding ->
         // Stable WebView slot preserved across Tablet side-by-side Row <-> Phone Column transitions
-        val latestOnExportReady by rememberUpdatedState({ mode: String, idmJson: String, isAutoSave: Boolean ->
+        val latestOnExportReady by rememberUpdatedState({ mode: String, idmJson: String, isAutoSave: Boolean, charCount: Int ->
+            val shouldExitAfter = exitAfterSavePending && !isAutoSave
+            val followUpAction = if (!isAutoSave) pendingActionAfterSave else null
+            if (!isAutoSave) {
+                exitAfterSavePending = false
+                pendingActionAfterSave = null
+            }
             viewModel.handleExportPayload(
                 exportMode = mode,
                 idmJson = idmJson,
                 isAutoSave = isAutoSave,
-                onRequestSafCreateFile = { suggested, mime ->
-                    when (mime) {
-                        TargetFileType.DOC.mimeType -> createDocLauncher.launch(suggested)
-                        TargetFileType.PDF.mimeType -> createPdfLauncher.launch(suggested)
-                        else -> createDocxLauncher.launch(suggested)
+                charCount = charCount,
+                onRequestSafCreateFile = { req ->
+                    createDocumentLauncher.launch(req)
+                },
+                onSaveCompleteCallback = when {
+                    shouldExitAfter -> { { onBack() } }
+                    followUpAction == PendingDirtyAction.SHARE_AS_IS -> {
+                        { viewModel.shareExistingFileAsIs() }
                     }
+                    followUpAction == PendingDirtyAction.SHARE_DIFFERENT_FORMAT -> {
+                        {
+                            chosenEncoding = null
+                            pendingExportAction = ExportAction.SHARE_DIFFERENT
+                        }
+                    }
+                    followUpAction == PendingDirtyAction.CHANGE_DOCUMENT_TYPE -> {
+                        { showChangeDocTypeDialog = true }
+                    }
+                    else -> null
                 }
             )
         })
@@ -594,26 +864,51 @@ fun EditorScreen(
         })
         val stableWebViewSlot = remember {
             movableContentOf {
-                EditorWebViewHost(
-                    onWebViewCreated = { webViewRef = it },
-                    onEditorReady = { isWebReady = true },
-                    onDocumentLoaded = viewModel::onWebDocumentLoaded,
-                    onContentDirty = viewModel::markDirty,
-                    onDraftChanged = viewModel::onDraftChanged,
-                    onExportReady = { mode, idmJson, isAutoSave ->
-                        latestOnExportReady(mode, idmJson, isAutoSave)
-                    },
-                    onSearchResults = { current, total ->
-                        currentMatchIdx = current
-                        totalMatches = total
-                    },
-                    onReplaceDone = { count ->
-                        latestOnReplaceDone(count)
-                    },
-                    onEditorError = { err ->
-                        viewModel.reportEditorError(err)
-                    }
-                )
+                key(webViewInstanceGeneration) {
+                    EditorWebViewHost(
+                        payloadProvider = viewModel::getPendingWebPayloadBytes,
+                        onWebViewCreated = { webViewRef = it },
+                        onEditorReady = { isWebReady = true },
+                        onDocumentLoaded = viewModel::onWebDocumentLoaded,
+                        onContentDirty = viewModel::markDirty,
+                        onEditDelta = viewModel::onEditDelta,
+                        onCheckpointReady = viewModel::onCheckpointReady,
+                        onExportReady = { mode, idmJson, isAutoSave, charCount ->
+                            latestOnExportReady(mode, idmJson, isAutoSave, charCount)
+                        },
+                        onSearchResults = { current, total ->
+                            currentMatchIdx = current
+                            totalMatches = total
+                        },
+                        onReplaceDone = { count ->
+                            latestOnReplaceDone(count)
+                        },
+                        onZoomChanged = { pct ->
+                            zoomPercent = pct.coerceIn(50, 300)
+                        },
+                        onEditorWarning = { warn ->
+                            viewModel.reportEditorWarning(warn)
+                        },
+                        onEditorError = { err ->
+                            exitAfterSavePending = false
+                            pendingActionAfterSave = null
+                            viewModel.reportEditorError(err)
+                        },
+                        onRenderProcessCrashed = {
+                            if (webViewCrashCount < 2) {
+                                webViewCrashCount++
+                                isWebReady = false
+                                webViewRef = null
+                                webViewInstanceGeneration++
+                                viewModel.reloadAfterWebViewCrash()
+                            } else {
+                                viewModel.reportEditorError(
+                                    "The editor ran low on device memory repeatedly. Your latest edits are safely backed up; please reopen Kadata."
+                                )
+                            }
+                        }
+                    )
+                }
             }
         }
 
@@ -633,7 +928,7 @@ fun EditorScreen(
             }
 
             // Collapsible Formatting Strip (Table button removed as requested)
-            AnimatedVisibility(visible = uiState.showFormattingStrip && !uiState.isOriginalView && !showKannadaKeyboard) {
+            AnimatedVisibility(visible = uiState.showFormattingStrip && !uiState.isOriginalView && !uiState.isExternalReadOnly && !showKannadaKeyboard) {
                 Surface(
                     color = MaterialTheme.colorScheme.surfaceVariant,
                     modifier = Modifier.fillMaxWidth()
@@ -659,6 +954,54 @@ fun EditorScreen(
                         }
                         FormatButton("Redo", Icons.AutoMirrored.Filled.Redo) {
                             execJs("window.KannadaDocEditor.execFormat('redo');")
+                        }
+                        // Always-accessible Document Zoom (- | 100% | +) for ALL file formats
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
+                            border = BorderStroke(0.75.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(horizontal = 2.dp)
+                            ) {
+                                IconButton(
+                                    onClick = {
+                                        val next = (zoomPercent - 15).coerceIn(50, 300)
+                                        zoomPercent = next
+                                        execJs("window.KannadaDocEditor && window.KannadaDocEditor.setZoomPercent($next);")
+                                    },
+                                    enabled = zoomPercent > 50,
+                                    modifier = Modifier.size(34.dp)
+                                ) {
+                                    Icon(Icons.Default.ZoomOut, contentDescription = "Zoom out", modifier = Modifier.size(18.dp))
+                                }
+                                Text(
+                                    text = "$zoomPercent%",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (zoomPercent != 100) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable {
+                                            zoomPercent = 100
+                                            execJs("window.KannadaDocEditor && window.KannadaDocEditor.setZoomPercent(100);")
+                                        }
+                                        .padding(horizontal = 4.dp, vertical = 4.dp)
+                                )
+                                IconButton(
+                                    onClick = {
+                                        val next = (zoomPercent + 15).coerceIn(50, 300)
+                                        zoomPercent = next
+                                        execJs("window.KannadaDocEditor && window.KannadaDocEditor.setZoomPercent($next);")
+                                    },
+                                    enabled = zoomPercent < 300,
+                                    modifier = Modifier.size(34.dp)
+                                ) {
+                                    Icon(Icons.Default.ZoomIn, contentDescription = "Zoom in", modifier = Modifier.size(18.dp))
+                                }
+                            }
                         }
                         FormatButton("Smaller text", Icons.Default.TextDecrease) {
                             val next = viewModel.adjustFontSize(-2)
@@ -829,6 +1172,50 @@ fun EditorScreen(
                 HorizontalDivider()
             }
 
+            // External Service Read-Only Banner (WhatsApp / Gmail / Telegram / Drive) with 1-tap Edit -> Save First
+            AnimatedVisibility(visible = uiState.isExternalReadOnly && !uiState.isLoading && uiState.loadErrorMessage == null) {
+                val srcName = uiState.sourceAppLabel ?: "External App"
+                Surface(
+                    color = MaterialTheme.colorScheme.secondaryContainer,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Lock,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Text(
+                            text = if (knOnly) {
+                                "$srcName ನಿಂದ ತೆರೆಯಲಾಗಿದೆ (ಓದಲು ಮಾತ್ರ). ತಿದ್ದುಪಡಿ ಮಾಡಲು ಮೊದಲು ಉಳಿಸಿ."
+                            } else {
+                                "Opened from $srcName (Read-Only) • Save to Kadata Documents to edit."
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Button(
+                            onClick = { showExternalReadOnlySaveDialog = true },
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                            modifier = Modifier.height(34.dp)
+                        ) {
+                            Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text(if (knOnly) "ತಿದ್ದುಪಡಿ" else "Edit", style = MaterialTheme.typography.labelMedium)
+                        }
+                    }
+                }
+            }
+
+
             AnimatedVisibility(visible = uiState.conversionBannerText != null) {
                 Surface(
                     color = MaterialTheme.colorScheme.primaryContainer,
@@ -870,7 +1257,7 @@ fun EditorScreen(
                 }
             }
 
-                val keyboardVisible = showKannadaKeyboard && !uiState.isLoading && !uiState.isOriginalView
+                val keyboardVisible = showKannadaKeyboard && !uiState.isLoading && !uiState.isOriginalView && !uiState.isExternalReadOnly && uiState.loadErrorMessage == null
 
                 if (isTabletSideMode && keyboardVisible) {
                     // TABLET SIDE-BY-SIDE MODE:
@@ -921,7 +1308,7 @@ fun EditorScreen(
                     Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
                         stableWebViewSlot()
 
-                        if (!uiState.isLoading && !uiState.isOriginalView && !showKannadaKeyboard) {
+                        if (!uiState.isLoading && !uiState.isOriginalView && !uiState.isExternalReadOnly && !showKannadaKeyboard && uiState.loadErrorMessage == null) {
                             FloatingKeyboardActionButtons(
                                 anchor = keyboardAnchor,
                                 isSystemKeyboardOpen = isSystemKeyboardOpen,
@@ -966,7 +1353,116 @@ fun EditorScreen(
                             )
                         }
 
-                        if (uiState.isLoading) {
+                        // Floating Zoom Pill shown in Read-Only Original View, when Formatting Bar is hidden,
+                        // or whenever zoomed (gives quick 1-tap zoom/reset in every view without blocking keyboard buttons)
+                        val showFloatingZoomPill = !uiState.isLoading && !showKannadaKeyboard && uiState.loadErrorMessage == null && (
+                            uiState.isOriginalView || !uiState.showFormattingStrip || zoomPercent != 100
+                        )
+                        if (showFloatingZoomPill) {
+                            Surface(
+                                shape = RoundedCornerShape(22.dp),
+                                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+                                tonalElevation = 4.dp,
+                                shadowElevation = 6.dp,
+                                border = BorderStroke(0.8.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)),
+                                modifier = Modifier
+                                    .align(Alignment.BottomCenter)
+                                    .padding(bottom = 12.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                                ) {
+                                    IconButton(
+                                        onClick = {
+                                            val next = (zoomPercent - 15).coerceIn(50, 300)
+                                            zoomPercent = next
+                                            execJs("window.KannadaDocEditor && window.KannadaDocEditor.setZoomPercent($next);")
+                                        },
+                                        enabled = zoomPercent > 50,
+                                        modifier = Modifier.size(34.dp)
+                                    ) {
+                                        Icon(Icons.Default.ZoomOut, contentDescription = "Zoom out", modifier = Modifier.size(18.dp))
+                                    }
+                                    Text(
+                                        text = "$zoomPercent%",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (zoomPercent != 100) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurface,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .clickable {
+                                                zoomPercent = 100
+                                                execJs("window.KannadaDocEditor && window.KannadaDocEditor.setZoomPercent(100);")
+                                            }
+                                            .padding(horizontal = 6.dp, vertical = 4.dp)
+                                    )
+                                    IconButton(
+                                        onClick = {
+                                            val next = (zoomPercent + 15).coerceIn(50, 300)
+                                            zoomPercent = next
+                                            execJs("window.KannadaDocEditor && window.KannadaDocEditor.setZoomPercent($next);")
+                                        },
+                                        enabled = zoomPercent < 300,
+                                        modifier = Modifier.size(34.dp)
+                                    ) {
+                                        Icon(Icons.Default.ZoomIn, contentDescription = "Zoom in", modifier = Modifier.size(18.dp))
+                                    }
+                                }
+                            }
+                        }
+
+                        if (uiState.loadErrorMessage != null) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.background,
+                                modifier = Modifier.fillMaxSize()
+                            ) {
+                                Box(
+                                    contentAlignment = Alignment.Center,
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .padding(24.dp)
+                                ) {
+                                    Surface(
+                                        shape = RoundedCornerShape(16.dp),
+                                        color = MaterialTheme.colorScheme.surface,
+                                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.55f)),
+                                        tonalElevation = 4.dp,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Column(
+                                            modifier = Modifier
+                                                .padding(20.dp)
+                                                .verticalScroll(rememberScrollState()),
+                                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                                            horizontalAlignment = Alignment.CenterHorizontally
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Info,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.error,
+                                                modifier = Modifier.size(36.dp)
+                                            )
+                                            Text(
+                                                text = uiState.loadErrorTitle ?: "Unable to Open Document",
+                                                style = MaterialTheme.typography.titleMedium,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.error
+                                            )
+                                            Text(
+                                                text = uiState.loadErrorMessage ?: "",
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                color = MaterialTheme.colorScheme.onSurface
+                                            )
+                                            Button(onClick = onBack) {
+                                                Text(if (knOnly) "ಮುಖಪುಟಕ್ಕೆ ಹಿಂತಿರುಗಿ" else "Back to Home • ಮುಖಪುಟಕ್ಕೆ ಹಿಂತಿರುಗಿ")
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else if (uiState.isLoading) {
                             Surface(
                                 color = MaterialTheme.colorScheme.background.copy(alpha = 0.85f),
                                 modifier = Modifier.fillMaxSize()
@@ -1075,12 +1571,12 @@ fun EditorScreen(
                     },
                     enabled = renameDraftText.isNotBlank()
                 ) {
-                    Text(if (knOnly) "ಬದಲಿಸಿ" else "Rename")
+                    Text(if (knOnly) "ಬದಲಿಸಿ" else "Rename • ಬದಲಿಸಿ")
                 }
             },
             dismissButton = {
                 TextButton(onClick = { showRenameDialog = false }) {
-                    Text(if (knOnly) "ರದ್ದು" else "Cancel")
+                    Text(if (knOnly) "ರದ್ದು" else "Cancel • ರದ್ದು")
                 }
             }
         )
@@ -1090,15 +1586,15 @@ fun EditorScreen(
     if (showConfirmReplaceAll) {
         AlertDialog(
             onDismissRequest = { showConfirmReplaceAll = false },
-            title = { Text(if (knOnly) "ಎಲ್ಲಾ ಪದಗಳನ್ನು ಬದಲಿಸಬೇಕೇ?" else "Replace All Matches?") },
+            title = {
+                Text(if (knOnly) "ಎಲ್ಲಾ ಪದಗಳನ್ನು ಬದಲಿಸಬೇಕೇ?" else "Replace All Matches? • ಎಲ್ಲಾ ಪದಗಳನ್ನು ಬದಲಿಸಬೇಕೇ?")
+            },
             text = {
+                val knText = "\"$findQuery\" ನ ಎಲ್ಲಾ $totalMatches ಸ್ಥಳಗಳನ್ನು \"$replaceQuery\" ಗೆ ಬದಲಿಸಲಾಗುತ್ತದೆ."
+                val enText = "Replace all $totalMatches occurrences of \"$findQuery\" with \"$replaceQuery\"?"
                 Text(
-                    text = if (knOnly) {
-                        "\"$findQuery\" ನ ಎಲ್ಲಾ $totalMatches ಸ್ಥಳಗಳನ್ನು \"$replaceQuery\" ಗೆ ಬದಲಿಸಲಾಗುತ್ತದೆ."
-                    } else {
-                        "Replace all $totalMatches occurrences of \"$findQuery\" with \"$replaceQuery\"?"
-                    },
-                    style = MaterialTheme.typography.bodyLarge
+                    text = if (knOnly) knText else "$enText\n\n$knText",
+                    style = MaterialTheme.typography.bodyMedium
                 )
             },
             confirmButton = {
@@ -1110,12 +1606,12 @@ fun EditorScreen(
                             "${JSONObject.quote(replaceQuery)});"
                     )
                 }) {
-                    Text(if (knOnly) "ಎಲ್ಲಾ ಬದಲಿಸಿ" else "Replace All")
+                    Text(if (knOnly) "ಎಲ್ಲಾ ಬದಲಿಸಿ" else "Replace All • ಎಲ್ಲಾ ಬದಲಿಸಿ")
                 }
             },
             dismissButton = {
                 TextButton(onClick = { showConfirmReplaceAll = false }) {
-                    Text(if (knOnly) "ರದ್ದು" else "Cancel")
+                    Text(if (knOnly) "ರದ್ದು" else "Cancel • ರದ್ದು")
                 }
             }
         )
@@ -1271,6 +1767,42 @@ fun EditorScreen(
 
                     HorizontalDivider()
 
+                    Text(
+                        text = if (knOnly) {
+                            if (userSettings.breakReminderMinutes == 0) "ಆರೋಗ್ಯ ವಿರಾಮ ಸೂಚನೆ: ಆಫ್"
+                            else "ಆರೋಗ್ಯ ವಿರಾಮ ಸೂಚನೆ: ${userSettings.breakReminderMinutes} ನಿಮಿಷ"
+                        } else {
+                            if (userSettings.breakReminderMinutes == 0) "Wellness Break Reminder: Off"
+                            else "Wellness Break Reminder: ${userSettings.breakReminderMinutes} min"
+                        },
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        AppPreferences.BREAK_REMINDER_OPTIONS_MINUTES.forEach { mins ->
+                            FilterChip(
+                                selected = userSettings.breakReminderMinutes == mins,
+                                onClick = { onBreakReminderChange(mins) },
+                                label = {
+                                    Text(
+                                        when {
+                                            mins == 0 && knOnly -> "ಆಫ್"
+                                            mins == 0 -> "Off"
+                                            knOnly -> "$mins ನಿ"
+                                            else -> "${mins}m"
+                                        }
+                                    )
+                                }
+                            )
+                        }
+                    }
+
+                    HorizontalDivider()
+
                     Column {
                         Text(
                             text = if (knOnly) "ಅಕ್ಷರದ ಗಾತ್ರ: ${userSettings.defaultFontSizePt} pt"
@@ -1321,7 +1853,7 @@ fun EditorScreen(
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text(if (knOnly) "ಡೀಫಾಲ್ಟ್ ಆಪ್ ಆಗಿ ಹೊಂದಿಸಿ" else "Set as Default App")
+                        Text(if (knOnly) "ಆಪ್ ಮಾಹಿತಿ" else "App Info")
                     }
 
                 }
@@ -1429,16 +1961,17 @@ fun EditorScreen(
         AlertDialog(
             onDismissRequest = { pendingConvertTarget = null },
             title = {
-                Text(if (knOnly) "ಫಾರ್ಮ್ಯಾಟ್ ಬದಲಿಸಬೇಕೇ?" else "Convert Document to ${targetEnc.labelEn}?")
+                Text(
+                    if (knOnly) "ಫಾರ್ಮ್ಯಾಟ್ ಬದಲಿಸಬೇಕೇ?"
+                    else "Convert to ${targetEnc.labelEn}? • ಫಾರ್ಮ್ಯಾಟ್ ಬದಲಿಸಬೇಕೇ?"
+                )
             },
             text = {
+                val knText = "ಈ ದಾಖಲೆಯನ್ನು ${targetEnc.labelKn} (.docx) ಫಾರ್ಮ್ಯಾಟ್‌ಗೆ ಪರಿವರ್ತಿಸಿ ಉಳಿಸಲಾಗುತ್ತದೆ ಮತ್ತು ಇತ್ತೀಚಿನ ಫೈಲ್‌ಗಳಲ್ಲಿ ತೋರಿಸಲಾಗುತ್ತದೆ."
+                val enText = "Convert and save this document in ${targetEnc.labelEn} (.docx) format? The converted file will also appear in Recent Files."
                 Text(
-                    text = if (knOnly) {
-                        "ಈ ದಾಖಲೆಯನ್ನು ${targetEnc.labelKn} (.docx) ಫಾರ್ಮ್ಯಾಟ್‌ಗೆ ಪರಿವರ್ತಿಸಿ ಉಳಿಸಲಾಗುತ್ತದೆ ಮತ್ತು ಇತ್ತೀಚಿನ ಫೈಲ್‌ಗಳಲ್ಲಿ ತೋರಿಸಲಾಗುತ್ತದೆ."
-                    } else {
-                        "Convert and save this document in ${targetEnc.labelEn} (.docx) format? The converted file will also appear in Recent Files."
-                    },
-                    style = MaterialTheme.typography.bodyLarge
+                    text = if (knOnly) knText else "$enText\n\n$knText",
+                    style = MaterialTheme.typography.bodyMedium
                 )
             },
             confirmButton = {
@@ -1447,12 +1980,12 @@ fun EditorScreen(
                     pendingConvertTarget = null
                     execJs("window.KannadaDocEditor.requestExport('$mode', false);")
                 }) {
-                    Text(if (knOnly) "ಪರಿವರ್ತಿಸಿ" else "Convert")
+                    Text(if (knOnly) "ಪರಿವರ್ತಿಸಿ" else "Convert • ಪರಿವರ್ತಿಸಿ")
                 }
             },
             dismissButton = {
                 TextButton(onClick = { pendingConvertTarget = null }) {
-                    Text(if (knOnly) "ರದ್ದು" else "Cancel")
+                    Text(if (knOnly) "ರದ್ದು" else "Cancel • ರದ್ದು")
                 }
             }
         )
@@ -1489,6 +2022,310 @@ fun EditorScreen(
             confirmButton = {
                 Button(onClick = { showDocInfoDialog = false }) {
                     Text("OK")
+                }
+            }
+        )
+    }
+
+    // 1. External Service Read-Only -> Save First to Edit Dialog (WhatsApp / Gmail / Drive)
+    if (showExternalReadOnlySaveDialog) {
+        val srcName = uiState.sourceAppLabel ?: "External App"
+        AlertDialog(
+            onDismissRequest = { showExternalReadOnlySaveDialog = false },
+            title = {
+                Text(
+                    if (knOnly) "ತಿದ್ದುಪಡಿ ಮಾಡಲು ಮೊದಲು ಉಳಿಸಿ"
+                    else "Save File to Start Editing • ಮೊದಲು ಉಳಿಸಿ"
+                )
+            },
+            text = {
+                val knText = "ಈ ದಾಖಲೆ $srcName ನಿಂದ ಬಂದಿದ್ದು ಓದಲು ಮಾತ್ರ ಲಭ್ಯವಿದೆ. ತಿದ್ದುಪಡಿ ಮಾಡಲು ಇದನ್ನು ಮೊದಲು \"Documents/Kadata Documents\" ಫೋಲ್ಡರ್‌ನಲ್ಲಿ ಉಳಿಸಬೇಕು."
+                val enText = "This document was opened from $srcName and is read-only. To edit it, Kadata will save an editable copy inside \"Documents/Kadata Documents\" and unlock editing immediately."
+                Text(
+                    text = if (knOnly) knText else "$enText\n\n$knText",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showExternalReadOnlySaveDialog = false
+                        viewModel.saveExternalReadOnlyToKadataAndUnlock {
+                            execJs("window.KannadaDocEditor && window.KannadaDocEditor.setExternalReadOnly(false);")
+                        }
+                    },
+                    enabled = !uiState.isSaving
+                ) {
+                    Text(if (knOnly) "ಉಳಿಸಿ ಮತ್ತು ತಿದ್ದುಪಡಿ ಮಾಡಿ" else "Save & Edit • ಉಳಿಸಿ")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showExternalReadOnlySaveDialog = false }) {
+                    Text(if (knOnly) "ರದ್ದು" else "Cancel • ರದ್ದು")
+                }
+            }
+        )
+    }
+
+    // 2. Unsaved Changes Exit Guard Dialog (Back Arrow & System Back)
+    if (showUnsavedExitDialog) {
+        AlertDialog(
+            onDismissRequest = { showUnsavedExitDialog = false },
+            title = {
+                Text(if (knOnly) "ಉಳಿಸದ ಬದಲಾವಣೆಗಳಿವೆ" else "Save Changes Before Closing? • ಉಳಿಸದ ಬದಲಾವಣೆಗಳಿವೆ")
+            },
+            text = {
+                val knText = "\"${uiState.documentTitle}\" ನಲ್ಲಿ ಉಳಿಸದ ಬದಲಾವಣೆಗಳಿವೆ. ಮುಚ್ಚುವ ಮೊದಲು ಉಳಿಸಬೇಕೇ?"
+                val enText = "You have unsaved changes in \"${uiState.documentTitle}\". Save before returning to Home?"
+                Text(
+                    text = if (knOnly) knText else "$enText\n\n$knText",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    showUnsavedExitDialog = false
+                    exitAfterSavePending = true
+                    execJs(
+                        "window.KannadaDocEditor.requestExport('${userSettings.defaultSaveFormat.jsExportMode}', false);"
+                    )
+                }) {
+                    Text(if (knOnly) "ಉಳಿಸಿ ಮತ್ತು ಮುಚ್ಚಿ" else "Save & Close • ಉಳಿಸಿ")
+                }
+            },
+            dismissButton = {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(onClick = {
+                        showUnsavedExitDialog = false
+                        viewModel.discardUnsavedAndMarkClean()
+                        execJs("window.KannadaDocEditor && window.KannadaDocEditor.setVirtualKeyboardMode(false, false, 0);")
+                        execJs("window.KannadaDocEditor && window.KannadaDocEditor.clearSearch();")
+                        onBack()
+                    }) {
+                        Text(if (knOnly) "ತ್ಯಜಿಸಿ" else "Discard • ತ್ಯಜಿಸಿ", color = MaterialTheme.colorScheme.error)
+                    }
+                    TextButton(onClick = { showUnsavedExitDialog = false }) {
+                        Text(if (knOnly) "ರದ್ದು" else "Cancel • ರದ್ದು")
+                    }
+                }
+            }
+        )
+    }
+
+    // 2b. Unified Save-Before-Action Confirmation Dialog (Share, Share Different Format, Change Document Type)
+    pendingDirtyActionPrompt?.let { dirtyAction ->
+        val copy = when (dirtyAction) {
+            PendingDirtyAction.SHARE_AS_IS -> DirtyActionPromptCopy(
+                titleEn = "Save Changes Before Sharing?",
+                titleKn = "ಹಂಚಿಕೊಳ್ಳುವ ಮೊದಲು ಉಳಿಸಬೇಕೇ?",
+                bodyEn = "You have unsaved changes in \"${uiState.documentTitle}\". Save them now so the latest version is shared.",
+                bodyKn = "\"${uiState.documentTitle}\" ನಲ್ಲಿ ಉಳಿಸದ ಬದಲಾವಣೆಗಳಿವೆ. ಇತ್ತೀಚಿನ ಆವೃತ್ತಿಯನ್ನು ಹಂಚಿಕೊಳ್ಳಲು ಈಗ ಉಳಿಸಿ ಮತ್ತು ಹಂಚಿಕೊಳ್ಳಿ.",
+                btnEn = "Save & Share",
+                btnKn = "ಉಳಿಸಿ ಮತ್ತು ಹಂಚಿಕೊಳ್ಳಿ",
+                savingEn = "Saving before sharing...",
+                savingKn = "ಹಂಚಿಕೊಳ್ಳುವ ಮೊದಲು ಉಳಿಸಲಾಗುತ್ತಿದೆ..."
+            )
+            PendingDirtyAction.SHARE_DIFFERENT_FORMAT -> DirtyActionPromptCopy(
+                titleEn = "Save Changes Before Sharing?",
+                titleKn = "ಬೇರೆ ಫಾರ್ಮ್ಯಾಟ್ ಹಂಚಿಕೊಳ್ಳುವ ಮೊದಲು ಉಳಿಸಬೇಕೇ?",
+                bodyEn = "You have unsaved changes in \"${uiState.documentTitle}\". Save them to this file first before sharing in a different format.",
+                bodyKn = "\"${uiState.documentTitle}\" ನಲ್ಲಿ ಉಳಿಸದ ಬದಲಾವಣೆಗಳಿವೆ. ಬೇರೆ ಫಾರ್ಮ್ಯಾಟ್‌ನಲ್ಲಿ ಹಂಚಿಕೊಳ್ಳುವ ಮೊದಲು ಈ ಫೈಲ್ ಅನ್ನು ಉಳಿಸಿ.",
+                btnEn = "Save & Continue",
+                btnKn = "ಉಳಿಸಿ ಮತ್ತು ಮುಂದುವರಿಸಿ",
+                savingEn = "Saving before sharing...",
+                savingKn = "ಹಂಚಿಕೊಳ್ಳುವ ಮೊದಲು ಉಳಿಸಲಾಗುತ್ತಿದೆ..."
+            )
+            PendingDirtyAction.CHANGE_DOCUMENT_TYPE -> DirtyActionPromptCopy(
+                titleEn = "Save Changes Before Converting?",
+                titleKn = "ಫಾರ್ಮ್ಯಾಟ್ ಬದಲಿಸುವ ಮೊದಲು ಉಳಿಸಬೇಕೇ?",
+                bodyEn = "You have unsaved changes in \"${uiState.documentTitle}\". Save them to the current file first before changing the document type.",
+                bodyKn = "\"${uiState.documentTitle}\" ನಲ್ಲಿ ಉಳಿಸದ ಬದಲಾವಣೆಗಳಿವೆ. ದಾಖಲೆ ಫಾರ್ಮ್ಯಾಟ್ ಬದಲಿಸುವ ಮೊದಲು ಪ್ರಸ್ತುತ ಫೈಲ್ ಅನ್ನು ಉಳಿಸಿ.",
+                btnEn = "Save & Continue",
+                btnKn = "ಉಳಿಸಿ ಮತ್ತು ಮುಂದುವರಿಸಿ",
+                savingEn = "Saving before converting...",
+                savingKn = "ಪರಿವರ್ತಿಸುವ ಮೊದಲು ಉಳಿಸಲಾಗುತ್ತಿದೆ..."
+            )
+        }
+        AlertDialog(
+            onDismissRequest = { pendingDirtyActionPrompt = null },
+            title = {
+                Text(if (knOnly) copy.titleKn else "${copy.titleEn} • ${copy.titleKn}")
+            },
+            text = {
+                Text(
+                    text = if (knOnly) copy.bodyKn else "${copy.bodyEn}\n\n${copy.bodyKn}",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        pendingDirtyActionPrompt = null
+                        pendingActionAfterSave = dirtyAction
+                        viewModel.showStatusMessage(if (knOnly) copy.savingKn else copy.savingEn)
+                        execJs(
+                            "window.KannadaDocEditor.requestExport('${userSettings.defaultSaveFormat.jsExportMode}', false);"
+                        )
+                    },
+                    enabled = !uiState.isSaving
+                ) {
+                    Text(if (knOnly) copy.btnKn else "${copy.btnEn} • ${copy.btnKn}")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDirtyActionPrompt = null }) {
+                    Text(if (knOnly) "ರದ್ದು" else "Cancel • ರದ್ದು")
+                }
+            }
+        )
+    }
+
+    // 3. File Versions List Dialog (3-dot menu -> read-only snapshots)
+    if (showVersionsDialog) {
+        AlertDialog(
+            onDismissRequest = { showVersionsDialog = false },
+            title = { Text(if (knOnly) "ಫೈಲ್ ಆವೃತ್ತಿಗಳು" else "File Versions • ಆವೃತ್ತಿಗಳು") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 380.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (uiState.isLoadingVersions) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(16.dp),
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(28.dp))
+                        }
+                    } else if (uiState.versionsList.isEmpty()) {
+                        val knEmpty = "ಇನ್ನೂ ಯಾವುದೇ ಬ್ಯಾಕಪ್ ಆವೃತ್ತಿಗಳು ದಾಖಲಾಗಿಲ್ಲ. ನೀವು ತಿದ್ದುಪಡಿ ಮಾಡಿ ಉಳಿಸಿದಾಗ ಆವೃತ್ತಿಗಳು ಸ್ವಯಂಚಾಲಿತವಾಗಿ ಇಲ್ಲಿ ಸಂಗ್ರಹವಾಗುತ್ತವೆ."
+                        val enEmpty = "No saved versions yet for this document. As you edit and save, Kadata automatically keeps recovery versions here."
+                        Text(
+                            text = if (knOnly) knEmpty else "$enEmpty\n\n$knEmpty",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else {
+                        val fmt = remember { SimpleDateFormat("dd MMM yyyy, hh:mm a", Locale.getDefault()) }
+                        uiState.versionsList.forEach { rev: RevisionEntity ->
+                            val stamp = fmt.format(Date(rev.createdAt))
+                            val deltaStr = when {
+                                rev.charDelta > 0 -> "+${rev.charDelta} chars"
+                                rev.charDelta < 0 -> "${rev.charDelta} chars"
+                                else -> "${rev.charCount} chars"
+                            }
+                            Surface(
+                                onClick = {
+                                    showVersionsDialog = false
+                                    viewModel.openVersionReadOnlyPreview(rev)
+                                },
+                                shape = MaterialTheme.shapes.medium,
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    Text(
+                                        text = stamp,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Text(
+                                        text = "${rev.triggerReason}  •  $deltaStr",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showVersionsDialog = false }) {
+                    Text(if (knOnly) "ಮುಚ್ಚಿ" else "Close")
+                }
+            }
+        )
+    }
+
+    // 4. File Version Read-Only Preview + Save as New File Dialog (zero overwrite / zero duplication)
+    uiState.versionPreview?.let { preview ->
+        LaunchedEffect(preview.revision.id) {
+            versionSaveNameDraft = preview.suggestedFileName
+        }
+        val stamp = remember(preview.revision.createdAt) {
+            SimpleDateFormat("dd MMM yyyy, hh:mm a", Locale.getDefault()).format(Date(preview.revision.createdAt))
+        }
+        AlertDialog(
+            onDismissRequest = viewModel::dismissVersionPreview,
+            title = {
+                Column {
+                    Text(if (knOnly) "ಆವೃತ್ತಿ ಮುನ್ನೋಟ (ಓದಲು ಮಾತ್ರ)" else "Version Preview (Read-Only) • ಆವೃತ್ತಿ ಮುನ್ನೋಟ")
+                    Text(
+                        text = "$stamp • ${preview.revision.triggerReason}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                        shape = MaterialTheme.shapes.small,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 120.dp, max = 260.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .verticalScroll(rememberScrollState())
+                                .padding(10.dp)
+                        ) {
+                            Text(
+                                text = preview.previewText,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+
+                    OutlinedTextField(
+                        value = versionSaveNameDraft,
+                        onValueChange = { versionSaveNameDraft = it },
+                        label = { Text(if (knOnly) "ಹೊಸ ಫೈಲ್ ಹೆಸರು" else "Save as New File Name") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.savePreviewedVersionAsNewFile(
+                            revision = preview.revision,
+                            desiredFileName = versionSaveNameDraft.ifBlank { preview.suggestedFileName }
+                        )
+                    },
+                    enabled = versionSaveNameDraft.isNotBlank() && !uiState.isSaving
+                ) {
+                    Text(if (knOnly) "ಹೊಸ ಫೈಲ್ ಆಗಿ ಉಳಿಸಿ" else "Save as New File")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::dismissVersionPreview) {
+                    Text(if (knOnly) "ಮುಚ್ಚಿ" else "Close")
                 }
             }
         )
@@ -1534,20 +2371,22 @@ private fun FormatButton(
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 private fun EditorWebViewHost(
+    payloadProvider: () -> ByteArray?,
     onWebViewCreated: (WebView) -> Unit,
     onEditorReady: () -> Unit,
     onDocumentLoaded: (Int, String, Boolean) -> Unit,
     onContentDirty: () -> Unit,
-    onDraftChanged: (String, String) -> Unit,
-    onExportReady: (String, String, Boolean) -> Unit,
+    onEditDelta: (Int, Boolean, Int) -> Unit,
+    onCheckpointReady: (String, Int) -> Unit,
+    onExportReady: (String, String, Boolean, Int) -> Unit,
     onSearchResults: (Int, Int) -> Unit,
     onReplaceDone: (Int) -> Unit,
-    onEditorError: (String) -> Unit
+    onZoomChanged: (Int) -> Unit,
+    onEditorWarning: (String) -> Unit,
+    onEditorError: (String) -> Unit,
+    onRenderProcessCrashed: () -> Unit
 ) {
     val context = LocalContext.current
-    val density = LocalDensity.current
-    val isSystemKeyboardOpen = WindowInsets.ime.getBottom(density) > 0
-    val softwareKeyboardController = LocalSoftwareKeyboardController.current
     val assetLoader = remember(context) {
         WebViewAssetLoader.Builder()
             .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(context))
@@ -1563,8 +2402,8 @@ private fun EditorWebViewHost(
                     domStorageEnabled = true
                     allowFileAccess = false
                     allowContentAccess = false
-                    setSupportZoom(true)
-                    builtInZoomControls = true
+                    setSupportZoom(false)
+                    builtInZoomControls = false
                     displayZoomControls = false
                     useWideViewPort = true
                     loadWithOverviewMode = false
@@ -1573,9 +2412,7 @@ private fun EditorWebViewHost(
 
                 val bridge = object {
                     @JavascriptInterface
-                    fun onEditorReady() {
-                        post { onEditorReady.invoke() }
-                    }
+                    fun onEditorReady() { post { onEditorReady.invoke() } }
 
                     @JavascriptInterface
                     fun onDocumentLoaded(convertedCount: Int, detectedSummary: String, restoredFromDraft: Boolean) {
@@ -1583,18 +2420,21 @@ private fun EditorWebViewHost(
                     }
 
                     @JavascriptInterface
-                    fun onContentDirty() {
-                        post { onContentDirty.invoke() }
+                    fun onContentDirty() { post { onContentDirty.invoke() } }
+
+                    @JavascriptInterface
+                    fun onEditDelta(deltaChars: Int, isLargePaste: Boolean, currentCharCount: Int) {
+                        post { onEditDelta(deltaChars, isLargePaste, currentCharCount) }
                     }
 
                     @JavascriptInterface
-                    fun onDraftChanged(html: String, idmJson: String) {
-                        post { onDraftChanged(html, idmJson) }
+                    fun onCheckpointReady(idmJson: String, charCount: Int) {
+                        post { onCheckpointReady(idmJson, charCount) }
                     }
 
                     @JavascriptInterface
-                    fun onExportReady(exportMode: String, idmJson: String, isAutoSave: Boolean) {
-                        post { onExportReady(exportMode, idmJson, isAutoSave) }
+                    fun onExportReady(exportMode: String, idmJson: String, isAutoSave: Boolean, charCount: Int) {
+                        post { onExportReady(exportMode, idmJson, isAutoSave, charCount) }
                     }
 
                     @JavascriptInterface
@@ -1603,14 +2443,16 @@ private fun EditorWebViewHost(
                     }
 
                     @JavascriptInterface
-                    fun onReplaceDone(replacedCount: Int) {
-                        post { onReplaceDone(replacedCount) }
-                    }
+                    fun onReplaceDone(replacedCount: Int) { post { onReplaceDone(replacedCount) } }
 
                     @JavascriptInterface
-                    fun onEditorError(errorMsg: String) {
-                        post { onEditorError(errorMsg) }
-                    }
+                    fun onZoomChanged(percent: Int) { post { onZoomChanged(percent) } }
+
+                    @JavascriptInterface
+                    fun onEditorWarning(warningMsg: String) { post { onEditorWarning(warningMsg) } }
+
+                    @JavascriptInterface
+                    fun onEditorError(errorMsg: String) { post { onEditorError(errorMsg) } }
                 }
 
                 addJavascriptInterface(bridge, "AndroidBridge")
@@ -1619,7 +2461,30 @@ private fun EditorWebViewHost(
                     override fun shouldInterceptRequest(
                         view: WebView,
                         request: WebResourceRequest
-                    ): WebResourceResponse? = assetLoader.shouldInterceptRequest(request.url)
+                    ): WebResourceResponse? {
+                        val url = request.url
+                        if (url.host == "appassets.androidplatform.net" && url.path == "/kadata-doc/payload.json") {
+                            val bytes = payloadProvider() ?: "{}".toByteArray(Charsets.UTF_8)
+                            return WebResourceResponse(
+                                "application/json",
+                                "UTF-8",
+                                ByteArrayInputStream(bytes)
+                            )
+                        }
+                        return assetLoader.shouldInterceptRequest(url)
+                    }
+
+                    override fun onRenderProcessGone(
+                        view: WebView,
+                        detail: RenderProcessGoneDetail
+                    ): Boolean {
+                        runCatching {
+                            (view.parent as? android.view.ViewGroup)?.removeView(view)
+                            view.destroy()
+                        }
+                        post { onRenderProcessCrashed.invoke() }
+                        return true
+                    }
                 }
 
                 onWebViewCreated(this)

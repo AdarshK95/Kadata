@@ -27,11 +27,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
@@ -45,13 +45,7 @@ fun AboutKadataDialog(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
-    val versionName = remember(context) {
-        runCatching {
-            @Suppress("DEPRECATION")
-            val pInfo = context.packageManager.getPackageInfo(context.packageName, 0)
-            pInfo.versionName?.takeIf { it.isNotBlank() } ?: "0.17.1"
-        }.getOrDefault("0.17.1")
-    }
+    val versionName = stringResource(id = R.string.app_version)
 
     AlertDialog(
         onDismissRequest = onDismiss,

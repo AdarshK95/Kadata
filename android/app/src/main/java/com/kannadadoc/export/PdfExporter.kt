@@ -22,7 +22,10 @@ import java.io.FileOutputStream
 
 /**
  * Generates crisp, vector-text A4 PDFs with HarfBuzz Kannada shaping using Android's
- * public PdfDocument + StaticLayout APIs (100% safe on Android 9 through Android 15+).
+ * public PdfDocument + StaticLayout APIs (100% safe on Android 9 through Android 16+).
+ *
+ * Paginates long paragraphs and tall table rows line-by-line across pages via
+ * [PdfPaginationPolicy] so zero lines are ever clipped off the bottom of a page.
  */
 class PdfExporter(private val context: Context) {
 
@@ -33,6 +36,7 @@ class PdfExporter(private val context: Context) {
         private const val MARGIN_X = 48f
         private const val MARGIN_TOP = 54f
         private const val MARGIN_BOTTOM = 54f
+        private const val MAX_PAGE_Y = PAGE_HEIGHT - MARGIN_BOTTOM
         private const val CONTENT_WIDTH = (PAGE_WIDTH - MARGIN_X * 2).toInt()
     }
 
@@ -47,111 +51,138 @@ class PdfExporter(private val context: Context) {
             val baseTypeface = loadKannadaTypeface()
             val pdfDoc = PdfDocument()
 
-            var pageNumber = 1
-            var currentPage = pdfDoc.startPage(
-                PdfDocument.PageInfo.Builder(PAGE_WIDTH, PAGE_HEIGHT, pageNumber).create()
-            )
-            var canvas = currentPage.canvas
-            var cursorY = MARGIN_TOP
-
-            val borderPaint = Paint().apply {
-                color = Color.parseColor("#B0B8B0")
-                style = Paint.Style.STROKE
-                strokeWidth = 0.75f
-            }
-            val headerBgPaint = Paint().apply {
-                color = Color.parseColor("#F1F5F1")
-                style = Paint.Style.FILL
-            }
-            val footerPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.parseColor("#757575")
-                textSize = 9f
-                typeface = baseTypeface
-            }
-
-            fun finishCurrentPage() {
-                val footerText = "Page $pageNumber"
-                val w = footerPaint.measureText(footerText)
-                canvas.drawText(footerText, PAGE_WIDTH - MARGIN_X - w, PAGE_HEIGHT - 24f, footerPaint)
-                pdfDoc.finishPage(currentPage)
-            }
-
-            fun startNextPage() {
-                finishCurrentPage()
-                pageNumber++
-                currentPage = pdfDoc.startPage(
+            try {
+                var pageNumber = 1
+                var currentPage = pdfDoc.startPage(
                     PdfDocument.PageInfo.Builder(PAGE_WIDTH, PAGE_HEIGHT, pageNumber).create()
                 )
-                canvas = currentPage.canvas
-                cursorY = MARGIN_TOP
-            }
+                var canvas = currentPage.canvas
+                var cursorY = MARGIN_TOP
 
-            fun ensureSpace(neededHeight: Float) {
-                if (cursorY + neededHeight > PAGE_HEIGHT - MARGIN_BOTTOM && cursorY > MARGIN_TOP + 10f) {
-                    startNextPage()
+                val borderPaint = Paint().apply {
+                    color = Color.parseColor("#B0B8B0")
+                    style = Paint.Style.STROKE
+                    strokeWidth = 0.75f
                 }
-            }
+                val headerBgPaint = Paint().apply {
+                    color = Color.parseColor("#F1F5F1")
+                    style = Paint.Style.FILL
+                }
+                val footerPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.parseColor("#757575")
+                    textSize = 9f
+                    typeface = baseTypeface
+                }
 
-            var orderedIndex = 0
+                fun finishCurrentPage() {
+                    val footerText = "Page $pageNumber"
+                    val w = footerPaint.measureText(footerText)
+                    canvas.drawText(footerText, PAGE_WIDTH - MARGIN_X - w, PAGE_HEIGHT - 24f, footerPaint)
+                    pdfDoc.finishPage(currentPage)
+                }
 
-            for (block in document.blocks) {
-                when (block) {
-                    is DocBlock.Paragraph -> {
-                        if (block.listType == "ordered") orderedIndex++ else orderedIndex = 0
-                        val prefix = when (block.listType) {
-                            "bullet" -> "•  "
-                            "ordered" -> "$orderedIndex.  "
-                            else -> ""
-                        }
+                fun startNextPage() {
+                    finishCurrentPage()
+                    pageNumber++
+                    currentPage = pdfDoc.startPage(
+                        PdfDocument.PageInfo.Builder(PAGE_WIDTH, PAGE_HEIGHT, pageNumber).create()
+                    )
+                    canvas = currentPage.canvas
+                    cursorY = MARGIN_TOP
+                }
 
-                        val paint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-                            color = Color.parseColor("#1A1C1A")
-                            typeface = baseTypeface
-                            textSize = when (block.headingLevel) {
-                                1 -> 18f
-                                2 -> 15f
-                                3 -> 13.5f
-                                else -> 12f
+                var orderedIndex = 0
+
+                for (block in document.blocks) {
+                    when (block) {
+                        is DocBlock.Paragraph -> {
+                            if (block.listType == "ordered") orderedIndex++ else orderedIndex = 0
+                            val prefix = when (block.listType) {
+                                "bullet" -> "•  "
+                                "ordered" -> "$orderedIndex.  "
+                                else -> ""
                             }
+
+                            val paint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                                color = Color.parseColor("#1A1C1A")
+                                typeface = baseTypeface
+                                textSize = when (block.headingLevel) {
+                                    1 -> 18f
+                                    2 -> 15f
+                                    3 -> 13.5f
+                                    else -> 12f
+                                }
+                            }
+
+                            val spannable = buildSpannable(block, prefix)
+                            val layout = buildStaticLayout(spannable, paint, CONTENT_WIDTH, block.alignment)
+                            val (lineTops, lineBottoms) = extractLineBounds(layout)
+                            val keepWholeLimit = if (block.headingLevel > 0) Int.MAX_VALUE else 3
+
+                            val (slices, _) = PdfPaginationPolicy.paginateSingleLayout(
+                                lineTops = lineTops,
+                                lineBottoms = lineBottoms,
+                                startCursorY = cursorY,
+                                marginTop = MARGIN_TOP,
+                                maxPageY = MAX_PAGE_Y,
+                                keepWholeMaxLines = keepWholeLimit
+                            )
+
+                            for (slice in slices) {
+                                if (slice.pageBreakBefore) {
+                                    startNextPage()
+                                }
+                                canvas.save()
+                                canvas.clipRect(
+                                    MARGIN_X - 2f,
+                                    cursorY,
+                                    PAGE_WIDTH - MARGIN_X + 2f,
+                                    cursorY + slice.sliceHeight + 1f
+                                )
+                                canvas.translate(MARGIN_X, cursorY - slice.sliceTop)
+                                layout.draw(canvas)
+                                canvas.restore()
+                                cursorY += slice.sliceHeight
+                            }
+
+                            val trailingGap = if (block.headingLevel > 0) 10f else 6f
+                            cursorY = (cursorY + trailingGap).coerceAtMost(MAX_PAGE_Y)
                         }
 
-                        val spannable = buildSpannable(block, prefix)
-                        val layout = buildStaticLayout(spannable, paint, CONTENT_WIDTH, block.alignment)
-                        val blockHeight = layout.height.toFloat() + if (block.headingLevel > 0) 10f else 6f
-
-                        ensureSpace(blockHeight)
-                        canvas.save()
-                        canvas.translate(MARGIN_X, cursorY)
-                        layout.draw(canvas)
-                        canvas.restore()
-                        cursorY += blockHeight
-                    }
-
-                    is DocBlock.Table -> {
-                        orderedIndex = 0
-                        drawTable(
-                            table = block,
-                            baseTypeface = baseTypeface,
-                            borderPaint = borderPaint,
-                            headerBgPaint = headerBgPaint,
-                            getCanvas = { canvas },
-                            getCursorY = { cursorY },
-                            advanceY = { dy -> cursorY += dy },
-                            ensureSpace = { h -> ensureSpace(h) }
-                        )
-                        cursorY += 10f
+                        is DocBlock.Table -> {
+                            orderedIndex = 0
+                            drawTable(
+                                table = block,
+                                baseTypeface = baseTypeface,
+                                borderPaint = borderPaint,
+                                headerBgPaint = headerBgPaint,
+                                getCanvas = { canvas },
+                                getCursorY = { cursorY },
+                                advanceY = { dy -> cursorY += dy },
+                                startNextPage = { startNextPage() }
+                            )
+                            cursorY = (cursorY + 10f).coerceAtMost(MAX_PAGE_Y)
+                        }
                     }
                 }
-            }
 
-            finishCurrentPage()
+                finishCurrentPage()
 
-            FileOutputStream(outFile).use { fos ->
-                pdfDoc.writeTo(fos)
+                FileOutputStream(outFile).use { fos ->
+                    pdfDoc.writeTo(fos)
+                }
+                outFile
+            } finally {
+                runCatching { pdfDoc.close() }
             }
-            pdfDoc.close()
-            outFile
         }
+
+    private fun extractLineBounds(layout: StaticLayout): Pair<IntArray, IntArray> {
+        val count = layout.lineCount
+        val tops = IntArray(count) { layout.getLineTop(it) }
+        val bottoms = IntArray(count) { layout.getLineBottom(it) }
+        return tops to bottoms
+    }
 
     private fun drawTable(
         table: DocBlock.Table,
@@ -161,7 +192,7 @@ class PdfExporter(private val context: Context) {
         getCanvas: () -> Canvas,
         getCursorY: () -> Float,
         advanceY: (Float) -> Unit,
-        ensureSpace: (Float) -> Unit
+        startNextPage: () -> Unit
     ) {
         val cellPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.parseColor("#1A1C1A")
@@ -185,24 +216,50 @@ class PdfExporter(private val context: Context) {
                 buildStaticLayout(sb, cellPaint, innerWidth, "left")
             }
 
-            val rowHeight = (cellLayouts.maxOfOrNull { it.height } ?: 16) + cellPad * 2
-            ensureSpace(rowHeight)
+            val boundsList = cellLayouts.map { extractLineBounds(it) }
+            val (rowSlices, _) = PdfPaginationPolicy.paginateTableRow(
+                colLineTops = boundsList.map { it.first },
+                colLineBottoms = boundsList.map { it.second },
+                cellPad = cellPad,
+                startCursorY = getCursorY(),
+                marginTop = MARGIN_TOP,
+                maxPageY = MAX_PAGE_Y
+            )
 
-            val topY = getCursorY()
-            val c = getCanvas()
-
-            cellLayouts.forEachIndexed { colIndex, layout ->
-                val leftX = MARGIN_X + colIndex * colWidth
-                if (rowIndex == 0) {
-                    c.drawRect(leftX, topY, leftX + colWidth, topY + rowHeight, headerBgPaint)
+            rowSlices.forEachIndexed { sliceIndex, slice ->
+                if (slice.pageBreakBefore) {
+                    startNextPage()
                 }
-                c.drawRect(leftX, topY, leftX + colWidth, topY + rowHeight, borderPaint)
-                c.save()
-                c.translate(leftX + cellPad, topY + cellPad)
-                layout.draw(c)
-                c.restore()
+                val topY = getCursorY()
+                val c = getCanvas()
+                val sliceHeight = slice.sliceRowHeight
+
+                cellLayouts.forEachIndexed { colIndex, layout ->
+                    val leftX = MARGIN_X + colIndex * colWidth
+                    if (rowIndex == 0 && sliceIndex == 0) {
+                        c.drawRect(leftX, topY, leftX + colWidth, topY + sliceHeight, headerBgPaint)
+                    }
+                    c.drawRect(leftX, topY, leftX + colWidth, topY + sliceHeight, borderPaint)
+
+                    val startL = slice.colStartLines[colIndex]
+                    val endL = slice.colEndLines[colIndex]
+                    if (startL <= endL && startL >= 0 && endL < layout.lineCount) {
+                        val sliceTop = layout.getLineTop(startL).toFloat()
+                        val sliceTextHeight = (layout.getLineBottom(endL) - layout.getLineTop(startL)).toFloat()
+                        c.save()
+                        c.clipRect(
+                            leftX + cellPad - 1f,
+                            topY + cellPad,
+                            leftX + colWidth - cellPad + 1f,
+                            topY + cellPad + sliceTextHeight + 1f
+                        )
+                        c.translate(leftX + cellPad, topY + cellPad - sliceTop)
+                        layout.draw(c)
+                        c.restore()
+                    }
+                }
+                advanceY(sliceHeight)
             }
-            advanceY(rowHeight)
         }
     }
 

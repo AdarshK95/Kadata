@@ -11,23 +11,39 @@ import com.kannadadoc.data.local.AppPreferences
 import com.kannadadoc.data.local.DraftDao
 import com.kannadadoc.data.local.RecentFileDao
 import com.kannadadoc.data.local.RecentFileEntity
+import com.kannadadoc.data.storage.CrashRecoveryCandidate
+import com.kannadadoc.data.storage.DocumentTitleHealer
+import com.kannadadoc.data.storage.ImportSourcePolicy
+import com.kannadadoc.data.storage.FileLocationHelper
 import com.kannadadoc.data.storage.IngestedDocument
+import com.kannadadoc.data.storage.RecoveryVaultManager
 import com.kannadadoc.data.storage.SafStorageManager
 import com.kannadadoc.data.storage.UnsupportedFormatException
 import com.kannadadoc.export.DocxWriter
+import com.kannadadoc.export.EpubWriter
+import com.kannadadoc.export.GoogleDocsShareHelper
+import com.kannadadoc.export.HtmlZipWriter
+import com.kannadadoc.export.OdtWriter
 import com.kannadadoc.export.PdfExporter
 import com.kannadadoc.export.RtfDocWriter
 import com.kannadadoc.export.ShareHelper
+import com.kannadadoc.export.TxtWriter
 import com.kannadadoc.parser.DocBlock
 import com.kannadadoc.parser.DocFormat
-import com.kannadadoc.parser.TextRun
 import com.kannadadoc.parser.DocumentJson
 import com.kannadadoc.parser.DocumentParserFacade
+import com.kannadadoc.parser.DocumentRouter
+import com.kannadadoc.parser.DocumentSizeLimitException
 import com.kannadadoc.parser.ParsedDocument
+import com.kannadadoc.parser.TextRun
+import com.kannadadoc.ui.common.CreateDocumentRequest
 import com.kannadadoc.ui.editor.ExportAction
 import com.kannadadoc.ui.editor.KannadaEncodingChoice
 import com.kannadadoc.ui.editor.TargetFileType
+import com.tom_roush.pdfbox.pdmodel.PDDocument
+import com.tom_roush.pdfbox.text.PDFTextStripper
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -36,33 +52,48 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.FileOutputStream
+import org.json.JSONObject
+import java.io.File
 
 enum class LibraryFilter(val labelEn: String, val labelKn: String) {
     ALL("All", "ಎಲ್ಲಾ"),
-    WORD("Word", "ವರ್ಡ್"),
+    WORD("Docs", "ಡಾಕ್ಸ್"),
     PDF("PDF", "ಪಿಡಿಎಫ್"),
-    TEXT("Text", "ಟೆಕ್ಸ್ಟ್"),
+    TEXT("Text/Web", "ಟೆಕ್ಸ್ಟ್/ವೆಬ್"),
+    EBOOK("EPUB", "ಇ-ಪುಸ್ತಕ"),
     EDITED("Edited", "ತಿದ್ದುಪಡಿ")
 }
+
+data class FileRejectionAlert(
+    val titleEn: String,
+    val titleKn: String,
+    val messageEn: String,
+    val messageKn: String
+)
 
 data class HomeUiState(
     val isLoading: Boolean = false,
     val errorMessage: String? = null,
     val statusMessage: String? = null,
-    val unsupportedFormatName: String? = null
+    val fileRejectionAlert: FileRejectionAlert? = null,
+    val crashRecoveryCandidate: CrashRecoveryCandidate? = null
 )
 
 class HomeViewModel(
     private val appContext: Context,
     private val storageManager: SafStorageManager,
+    private val recoveryVault: RecoveryVaultManager,
     private val recentFileDao: RecentFileDao,
     private val draftDao: DraftDao,
     private val preferences: AppPreferences,
     private val parserFacade: DocumentParserFacade,
     private val docxWriter: DocxWriter,
     private val rtfDocWriter: RtfDocWriter,
-    private val pdfExporter: PdfExporter
+    private val pdfExporter: PdfExporter,
+    private val odtWriter: OdtWriter = OdtWriter(),
+    private val txtWriter: TxtWriter = TxtWriter(),
+    private val htmlZipWriter: HtmlZipWriter = HtmlZipWriter(),
+    private val epubWriter: EpubWriter = EpubWriter(htmlZipWriter)
 ) : ViewModel() {
 
     companion object {
@@ -83,67 +114,89 @@ class HomeViewModel(
     ) { files, filter ->
         when (filter) {
             LibraryFilter.ALL -> files
-            LibraryFilter.WORD -> files.filter { it.detectedFormat == DocFormat.DOCX || it.detectedFormat == DocFormat.DOC }
-            LibraryFilter.PDF -> files.filter { it.detectedFormat == DocFormat.PDF }
-            LibraryFilter.TEXT -> files.filter { it.detectedFormat == DocFormat.TXT || it.detectedFormat == DocFormat.RTF }
-            LibraryFilter.EDITED -> files.filter { it.savedUnicodeUri != null }
+            LibraryFilter.WORD -> files.filter {
+                val fmt = it.displayFormat
+                fmt == DocFormat.DOCX || fmt == DocFormat.DOC || fmt == DocFormat.ODT
+            }
+            LibraryFilter.PDF -> files.filter { it.displayFormat == DocFormat.PDF }
+            LibraryFilter.TEXT -> files.filter {
+                val fmt = it.displayFormat
+                fmt == DocFormat.TXT || fmt == DocFormat.RTF || fmt == DocFormat.HTML
+            }
+            LibraryFilter.EBOOK -> files.filter { it.displayFormat == DocFormat.EPUB }
+            LibraryFilter.EDITED -> files.filter { it.isEdited }
         }
-    }.stateIn(
-        scope = viewModelScope,
-        started = SharingStarted.WhileSubscribed(5_000),
-        initialValue = emptyList()
-    )
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     private val _uiState = MutableStateFlow(HomeUiState())
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
 
-    private var pendingSafDoc: ParsedDocument? = null
-    private var pendingSafEncoding: KannadaEncodingChoice = KannadaEncodingChoice.NUDI
-    private var pendingSafFileType: TargetFileType = TargetFileType.DOCX
-    private var pendingSafSuggestedName: String = "Document.docx"
+    private val pendingSafMetaFile: File
+        get() = File(File(appContext.cacheDir, "save_staging").apply { mkdirs() }, "home_pending_saf.json")
+    private val pendingSafDocFile: File
+        get() = File(File(appContext.cacheDir, "save_staging").apply { mkdirs() }, "home_pending_saf_doc.json")
 
     private val backfilledUris = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
     init {
-        // Continuously backfill missing file sizes and Kannada format tags (Nudi/Baraha/Modern/English/Scanned)
-        // for all Recent Files so every single card/row displays consistent metadata.
         viewModelScope.launch(Dispatchers.IO) {
-            recentFileDao.observeRecentFiles(100).collect { files ->
-                val knownFormats = preferences.documentFormatMap.value
-                for (item in files) {
-                    // 1. Clean legacy internal hex prefix if present
-                    if (INTERNAL_HEX_PREFIX.containsMatchIn(item.displayName)) {
-                        val cleaned = item.displayName.replace(INTERNAL_HEX_PREFIX, "")
+            val pending = runCatching { recoveryVault.detectPendingCrashRecovery() }.getOrNull()
+            if (pending != null) _uiState.value = _uiState.value.copy(crashRecoveryCandidate = pending)
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                for (item in recentFileDao.getAllSnapshot()) {
+                    var currentName = item.displayName
+                    if (INTERNAL_HEX_PREFIX.containsMatchIn(currentName)) {
+                        val cleaned = currentName.replace(INTERNAL_HEX_PREFIX, "")
                         if (cleaned.isNotBlank()) {
-                            recentFileDao.updateDisplayName(item.uriString, cleaned)
+                            currentName = cleaned
+                            recentFileDao.updateDisplayName(item.uriString, cleaned, item.lastModifiedAt)
                             draftDao.updateTitle(item.uriString, cleaned)
+                            recoveryVault.renameDocumentRevisions(item.uriString, cleaned)
                         }
                     }
+                    val preserveIncoming = ImportSourcePolicy.shouldPreserveIncomingFileName(
+                        sourceAppLabel = item.sourceAppLabel,
+                        displayName = currentName
+                    )
+                    if (!preserveIncoming && DocumentTitleHealer.isGenericDisplayName(currentName)) {
+                        val healed = storageManager.healDisplayNameIfGeneric(Uri.parse(item.uriString), currentName, item.detectedFormat)
+                        if (healed != currentName && !DocumentTitleHealer.isGenericDisplayName(healed)) {
+                            recentFileDao.updateDisplayName(item.uriString, healed, item.lastModifiedAt)
+                            draftDao.updateTitle(item.uriString, healed)
+                            recoveryVault.renameDocumentRevisions(item.uriString, healed)
+                        }
+                    }
+                }
+            }
+        }
 
-                    val existingTag = knownFormats[item.uriString]
-                        ?: item.savedUnicodeUri?.let { knownFormats[it] }
+        viewModelScope.launch(Dispatchers.IO) {
+            recentFileDao.observePendingMetadataBackfill(batchSize = 50).collect { pendingFiles ->
+                val knownFormats = preferences.documentFormatMap.value
+                for (item in pendingFiles) {
+                    val legacyPrefTag = knownFormats[item.uriString]
+                    val roomTag = item.kannadaFormat?.takeIf { it.isNotBlank() && it != "PDF" }
                     val needsSize = item.fileSizeBytes <= 0L
-                    val needsFormat = existingTag.isNullOrBlank() || existingTag == "PDF"
+                    val canMigrateLegacyTag = roomTag == null && !legacyPrefTag.isNullOrBlank() && legacyPrefTag != "PDF"
+                    val needsDetectFormat = roomTag == null && !canMigrateLegacyTag
+                    if (!needsSize && !canMigrateLegacyTag && !needsDetectFormat) continue
 
-                    if (!needsSize && !needsFormat) continue
-                    val key = "${item.uriString}:${item.fileSizeBytes}:${existingTag.orEmpty()}"
-                    if (!backfilledUris.add(key)) continue
+                    val attemptKey = "${item.uriString}:${item.fileSizeBytes}:${roomTag.orEmpty()}:${legacyPrefTag.orEmpty()}"
+                    if (!backfilledUris.add(attemptKey)) continue
 
                     runCatching {
+                        if (canMigrateLegacyTag) recentFileDao.updateKannadaFormat(item.uriString, legacyPrefTag!!)
                         if (needsSize) {
-                            val primaryUri = Uri.parse(item.savedUnicodeUri ?: item.uriString)
-                            var actualSize = storageManager.queryActualFileSize(primaryUri)
-                            if (actualSize <= 0L && item.savedUnicodeUri != null) {
-                                actualSize = storageManager.queryActualFileSize(Uri.parse(item.uriString))
-                            }
-                            if (actualSize > 0L) {
-                                recentFileDao.updateFileSize(item.uriString, actualSize)
-                            }
+                            val actualSize = storageManager.queryActualFileSize(Uri.parse(item.uriString))
+                            if (actualSize > 0L) recentFileDao.updateFileSize(item.uriString, actualSize)
                         }
-
-                        if (needsFormat) {
+                        if (needsDetectFormat) {
                             val detectedTag = detectFormatTagForRecent(item)
                             if (detectedTag.isNotBlank()) {
+                                recentFileDao.updateKannadaFormat(item.uriString, detectedTag)
                                 preferences.setDocumentFormatTag(item.uriString, detectedTag)
                             }
                         }
@@ -160,58 +213,78 @@ class HomeViewModel(
             name.contains("_Baraha", ignoreCase = true) -> return "Baraha"
             name.contains("_Unicode", ignoreCase = true) || name.contains("_Universal", ignoreCase = true) -> return "Universal"
         }
+        val inspectUri = Uri.parse(item.uriString)
+        if (item.detectedFormat == DocFormat.PDF) return sniffFirstPagePdfFormat(inspectUri)
 
-        val inspectUri = Uri.parse(item.savedUnicodeUri ?: item.uriString)
-        val parsed = parserFacade.parseDocument(appContext, inspectUri, item.displayName, item.detectedFormat)
-            .getOrNull()
-
-        if (parsed == null) {
-            return if (item.detectedFormat == DocFormat.PDF) "Scanned" else "Universal"
-        }
-
+        val parsed = parserFacade.parseDocument(appContext, inspectUri, item.displayName, item.detectedFormat).getOrNull()
+            ?: return "Universal"
         val allRuns = mutableListOf<TextRun>()
         for (block in parsed.blocks) {
             when (block) {
                 is DocBlock.Paragraph -> allRuns.addAll(block.runs)
-                is DocBlock.Table -> block.rows.forEach { row ->
-                    row.forEach { cell -> cell.forEach { p -> allRuns.addAll(p.runs) } }
-                }
+                is DocBlock.Table -> block.rows.forEach { row -> row.forEach { cell -> cell.forEach { p -> allRuns.addAll(p.runs) } } }
             }
         }
-
-        var hasNudi = false
-        var hasBaraha = false
-        var hasUnicode = false
-        var hasEnglish = false
-        var nonBlankRuns = 0
-
+        var hasNudi = false; var hasBaraha = false; var hasUnicode = false; var hasEnglish = false
         for (run in allRuns) {
             val text = run.text
             if (text.isBlank()) continue
-            nonBlankRuns++
             val font = run.fontFamily?.trim()
             when {
-                KANNADA_UNICODE_REGEX.containsMatchIn(text) -> hasUnicode = true
                 font != null && BARAHA_FONT_REGEX.containsMatchIn(font) -> hasBaraha = true
                 font != null && NUDI_FONT_REGEX.containsMatchIn(font) -> hasNudi = true
                 HIGH_ASCII_NUDI_REGEX.containsMatchIn(text) -> hasNudi = true
+                KANNADA_UNICODE_REGEX.containsMatchIn(text) -> hasUnicode = true
                 LATIN_WORD_REGEX.containsMatchIn(text) -> hasEnglish = true
             }
         }
-
         return when {
-            nonBlankRuns == 0 && item.detectedFormat == DocFormat.PDF -> "Scanned"
             hasBaraha -> "Baraha"
             hasNudi -> "Nudi"
             hasUnicode -> "Universal"
             hasEnglish -> "English"
-            item.detectedFormat == DocFormat.PDF -> "Scanned"
             else -> preferences.settings.value.defaultSaveFormat.shortLabel
         }
     }
 
-    fun setFilter(filter: LibraryFilter) {
-        _selectedFilter.value = filter
+    private fun sniffFirstPagePdfFormat(uri: Uri): String = runCatching {
+        appContext.contentResolver.openInputStream(uri)?.use { stream ->
+            PDDocument.load(stream).use { pdDoc ->
+                if (pdDoc.numberOfPages <= 0) return@use "Scanned"
+                val page1Text = PDFTextStripper().apply { startPage = 1; endPage = 1 }.getText(pdDoc).orEmpty()
+                when {
+                    page1Text.isBlank() -> "Scanned"
+                    HIGH_ASCII_NUDI_REGEX.containsMatchIn(page1Text) -> "Nudi"
+                    KANNADA_UNICODE_REGEX.containsMatchIn(page1Text) -> "Universal"
+                    LATIN_WORD_REGEX.containsMatchIn(page1Text) -> "English"
+                    else -> "Scanned"
+                }
+            }
+        } ?: "Scanned"
+    }.getOrDefault("Scanned")
+
+    fun setFilter(filter: LibraryFilter) { _selectedFilter.value = filter }
+
+    fun openRecentCard(entity: RecentFileEntity, onDocumentReady: (IngestedDocument) -> Unit) {
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isLoading = true, errorMessage = null, fileRejectionAlert = null)
+            storageManager.openExistingRecentCard(entity)
+                .onSuccess { ingested ->
+                    _uiState.value = _uiState.value.copy(isLoading = false)
+                    onDocumentReady(ingested)
+                }
+                .onFailure { error ->
+                    _uiState.value = _uiState.value.copy(
+                        isLoading = false,
+                        fileRejectionAlert = FileRejectionAlert(
+                            titleEn = "Unable to Open File",
+                            titleKn = "ಫೈಲ್ ತೆರೆಯಲು ಸಾಧ್ಯವಾಗಲಿಲ್ಲ",
+                            messageEn = error.localizedMessage ?: "The file may have been moved, deleted, or storage permission expired.",
+                            messageKn = "ಈ ಫೈಲ್ ಅನ್ನು ತೆರೆಯಲು ಸಾಧ್ಯವಾಗಲಿಲ್ಲ. ಫೈಲ್ ಸ್ಥಳಾಂತರಗೊಂಡಿರಬಹುದು ಅಥವಾ ಅಳಿಸಿರಬಹುದು."
+                        )
+                    )
+                }
+        }
     }
 
     fun openUri(
@@ -221,67 +294,174 @@ class HomeViewModel(
         onDocumentReady: (IngestedDocument) -> Unit
     ) {
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(
-                isLoading = true,
-                errorMessage = null,
-                unsupportedFormatName = null
-            )
+            _uiState.value = _uiState.value.copy(isLoading = true, errorMessage = null, fileRejectionAlert = null)
             storageManager.ingestDocument(uri, intentFlags, titleHint)
                 .onSuccess { ingested ->
                     _uiState.value = _uiState.value.copy(isLoading = false)
-
                     onDocumentReady(ingested)
                 }
                 .onFailure { error ->
-                    if (error is UnsupportedFormatException) {
-                        _uiState.value = _uiState.value.copy(
-                            isLoading = false,
-                            unsupportedFormatName = error.formatName
+                    val rejection = when (error) {
+                        is DocumentSizeLimitException -> FileRejectionAlert(error.titleEn, error.titleKn, error.userMessageEn, error.userMessageKn)
+                        is UnsupportedFormatException -> FileRejectionAlert(
+                            "Unsupported File Format", "ಬೆಂಬಲಿತವಲ್ಲದ ಫೈಲ್",
+                            "This ${error.formatName} format is not supported.\n\nSupported formats: ${DocumentRouter.SUPPORTED_FORMATS_LABEL}",
+                            "ಈ ${error.formatName} ಫಾರ್ಮ್ಯಾಟ್ ಬೆಂಬಲಿತವಾಗಿಲ್ಲ.\n\nಬೆಂಬಲಿತ ಫಾರ್ಮ್ಯಾಟ್‌ಗಳು: ${DocumentRouter.SUPPORTED_FORMATS_LABEL}"
                         )
-                    } else {
-                        _uiState.value = _uiState.value.copy(
-                            isLoading = false,
-                            errorMessage = error.localizedMessage ?: "Failed to open document"
-                        )
+                        else -> {
+                            val detail = error.localizedMessage?.takeIf { it.isNotBlank() } ?: "The file may have been moved, deleted, or permission has expired."
+                            FileRejectionAlert(
+                                "Unable to Open File", "ಫೈಲ್ ತೆರೆಯಲು ಸಾಧ್ಯವಾಗಲಿಲ್ಲ",
+                                "Kadata could not open this file.\n\nReason: $detail",
+                                "ಕಡತ ಈ ಫೈಲ್ ಅನ್ನು ತೆರೆಯಲು ಸಾಧ್ಯವಾಗಲಿಲ್ಲ.\n\nಕಾರಣ: $detail"
+                            )
+                        }
                     }
+                    _uiState.value = _uiState.value.copy(isLoading = false, fileRejectionAlert = rejection)
                 }
         }
     }
 
-    fun createNewBlankDocument(
-        title: String,
-        onCreated: (IngestedDocument) -> Unit
-    ) {
+    fun createNewBlankDocument(title: String, onCreated: (IngestedDocument) -> Unit) {
         viewModelScope.launch {
-            val doc = storageManager.registerNewBlankDocument(title)
-            preferences.setDocumentFormatTag(
-                doc.entity.uriString,
-                preferences.settings.value.defaultSaveFormat.shortLabel
-            )
-            onCreated(doc)
+            _uiState.value = _uiState.value.copy(isLoading = true)
+            runCatching {
+                val saveFormat = preferences.settings.value.defaultSaveFormat
+                val defaultFont = if (saveFormat.shortLabel == "Universal") "Noto Sans Kannada" else "Calibri"
+                val doc = storageManager.registerNewBlankDocument(title, defaultFont, saveFormat.shortLabel, docxWriter)
+                preferences.setDocumentFormatTag(doc.entity.uriString, saveFormat.shortLabel)
+                doc
+            }.onSuccess { doc ->
+                _uiState.value = _uiState.value.copy(isLoading = false)
+                onCreated(doc)
+            }.onFailure { err ->
+                _uiState.value = _uiState.value.copy(isLoading = false, errorMessage = err.localizedMessage ?: "Failed to create new document")
+            }
         }
+    }
+
+    fun createEditableDocxFromPdf(extracted: ParsedDocument, onReady: (IngestedDocument, ParsedDocument) -> Unit) {
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isLoading = true)
+            runCatching {
+                val normalized = KannadaTextConverter.normalizeDocumentToUnicode(extracted)
+                val saveFormat = preferences.settings.value.defaultSaveFormat
+                val enc = when (saveFormat.shortLabel) {
+                    "Nudi" -> KannadaEncodingChoice.NUDI
+                    "Baraha" -> KannadaEncodingChoice.BARAHA
+                    else -> KannadaEncodingChoice.UNICODE
+                }
+                val prepared = if (enc == KannadaEncodingChoice.UNICODE) normalized else {
+                    KannadaTextConverter.prepareDocumentForLegacyExport(normalized, if (enc == KannadaEncodingChoice.BARAHA) "BRH Kannada" else "Nudi 01 e")
+                }
+                val base = storageManager.stripEncodingSuffix(extracted.fileName.substringBeforeLast('.')).ifBlank { "PDF Document" }
+                val ingested = storageManager.saveNewFileInKadataDocuments(
+                    desiredFileName = "$base (Edited).docx",
+                    format = DocFormat.DOCX,
+                    mimeType = TargetFileType.DOCX.mimeType,
+                    kannadaFormat = enc.shortBadge,
+                    isEdited = true
+                ) { out -> docxWriter.write(prepared, out, defaultFont = enc.defaultFontForWord) }
+                preferences.setDocumentFormatTag(ingested.entity.uriString, enc.shortBadge)
+                ingested to normalized.copy(sourceUri = ingested.entity.uriString, fileName = ingested.entity.displayName, sourceFormat = DocFormat.DOCX)
+            }.onSuccess { (ingested, boundDoc) ->
+                _uiState.value = _uiState.value.copy(isLoading = false, statusMessage = "Created editable copy: ${ingested.entity.displayName}")
+                onReady(ingested, boundDoc)
+            }.onFailure { err ->
+                _uiState.value = _uiState.value.copy(isLoading = false, errorMessage = err.localizedMessage ?: "Failed to create editable copy from PDF")
+            }
+        }
+    }
+
+    fun saveCrashRecoveryAsCopy(candidate: CrashRecoveryCandidate, onReady: (IngestedDocument) -> Unit) {
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isLoading = true)
+            runCatching {
+                val doc = recoveryVault.loadDocumentFromCheckpointPath(candidate.checkpointPath) ?: error("Recovery checkpoint unavailable.")
+                val saveFormat = preferences.settings.value.defaultSaveFormat
+                val enc = when (saveFormat.shortLabel) {
+                    "Nudi" -> KannadaEncodingChoice.NUDI
+                    "Baraha" -> KannadaEncodingChoice.BARAHA
+                    else -> KannadaEncodingChoice.UNICODE
+                }
+                val prepared = if (enc == KannadaEncodingChoice.UNICODE) doc else {
+                    KannadaTextConverter.prepareDocumentForLegacyExport(doc, if (enc == KannadaEncodingChoice.BARAHA) "BRH Kannada" else "Nudi 01 e")
+                }
+                val base = storageManager.stripEncodingSuffix(candidate.documentTitle.substringBeforeLast('.')).ifBlank { "Recovered" }
+                val ingested = storageManager.saveNewFileInKadataDocuments(
+                    desiredFileName = "${base}_Recovered.docx",
+                    format = DocFormat.DOCX,
+                    mimeType = TargetFileType.DOCX.mimeType,
+                    kannadaFormat = enc.shortBadge,
+                    isEdited = true
+                ) { out -> docxWriter.write(prepared, out, defaultFont = enc.defaultFontForWord) }
+                preferences.setDocumentFormatTag(ingested.entity.uriString, enc.shortBadge)
+                recoveryVault.clearCrashRecoveryMarker()
+                ingested
+            }.onSuccess { ingested ->
+                _uiState.value = _uiState.value.copy(isLoading = false, crashRecoveryCandidate = null, statusMessage = "Recovered copy saved as ${ingested.entity.displayName}")
+                onReady(ingested)
+            }.onFailure { err ->
+                _uiState.value = _uiState.value.copy(isLoading = false, errorMessage = err.localizedMessage ?: "Failed to save recovered copy")
+            }
+        }
+    }
+
+    fun dismissCrashRecovery(clearMarker: Boolean) {
+        _uiState.value = _uiState.value.copy(crashRecoveryCandidate = null)
+        if (clearMarker) viewModelScope.launch(Dispatchers.IO) { recoveryVault.clearCrashRecoveryMarker() }
     }
 
     fun renameRecentFile(entity: RecentFileEntity, rawNewName: String) {
-        val trimmed = rawNewName.trim()
-        if (trimmed.isEmpty()) return
-        val existingExt = entity.displayName.substringAfterLast('.', "")
-        val finalName = if (existingExt.isNotEmpty() && !trimmed.contains('.')) {
-            "$trimmed.$existingExt"
-        } else {
-            trimmed
-        }
         viewModelScope.launch {
-            recentFileDao.updateDisplayName(entity.uriString, finalName)
-            draftDao.updateTitle(entity.uriString, finalName)
+            _uiState.value = _uiState.value.copy(isLoading = true)
+            val result = storageManager.renameOwnedDocumentFile(
+                oldUriString = entity.uriString,
+                currentDisplayName = entity.displayName,
+                rawNewName = rawNewName,
+                recoveryVault = recoveryVault
+            )
+            result.onSuccess { renamed ->
+                if (renamed.uriString != entity.uriString) {
+                    val oldTag = preferences.documentFormatMap.value[entity.uriString]
+                    if (!oldTag.isNullOrBlank()) {
+                        preferences.setDocumentFormatTag(renamed.uriString, oldTag)
+                        preferences.removeDocumentFormatTag(entity.uriString)
+                    }
+                }
+                _uiState.value = _uiState.value.copy(
+                    isLoading = false,
+                    statusMessage = "Renamed to ${renamed.displayName}"
+                )
+            }.onFailure { err ->
+                _uiState.value = _uiState.value.copy(
+                    isLoading = false,
+                    errorMessage = err.localizedMessage ?: "Failed to rename file"
+                )
+            }
         }
     }
 
+    /**
+     * Remove from List ONLY: deletes the Recent Files row and marks in-app version snapshots
+     * orphaned (about 3 days grace), leaving the original file on disk completely untouched.
+     */
     fun removeRecentFile(uriString: String) {
         viewModelScope.launch {
-            recentFileDao.deleteByUri(uriString)
-            draftDao.deleteDraft(uriString)
-            preferences.removeDocumentFormatTag(uriString)
+            runCatching {
+                recentFileDao.deleteByUri(uriString)
+                draftDao.deleteDraft(uriString)
+                preferences.removeDocumentFormatTag(uriString)
+                recoveryVault.markDocumentOrphaned(uriString)
+            }.onSuccess {
+                _uiState.value = _uiState.value.copy(
+                    statusMessage = "Removed from list (original file kept in storage)"
+                )
+            }.onFailure { err ->
+                _uiState.value = _uiState.value.copy(
+                    errorMessage = err.localizedMessage ?: "Failed to remove item from list"
+                )
+            }
         }
     }
 
@@ -289,227 +469,165 @@ class HomeViewModel(
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true)
             runCatching {
-                val uriToShare = Uri.parse(entity.savedUnicodeUri ?: entity.uriString)
-                val cachedFile = storageManager.copyUriToExportCache(uriToShare, entity.displayName)
-                val mime = mimeFor(entity.displayName, entity.detectedFormat)
+                val cachedFile = storageManager.copyUriToExportCache(Uri.parse(entity.uriString), entity.displayName)
+                val mime = mimeFor(entity.displayName, entity.displayFormat)
                 _uiState.value = _uiState.value.copy(isLoading = false)
-                ShareHelper.shareFile(
-                    context = appContext,
-                    file = cachedFile,
-                    mimeType = mime,
-                    chooserTitle = "Share • ಹಂಚಿಕೊಳ್ಳಿ"
-                )
+                ShareHelper.shareFile(appContext, cachedFile, mime, "Share • ಹಂಚಿಕೊಳ್ಳಿ")
             }.onFailure { err ->
-                _uiState.value = _uiState.value.copy(
-                    isLoading = false,
-                    errorMessage = err.localizedMessage ?: "Unable to share file"
-                )
+                _uiState.value = _uiState.value.copy(isLoading = false, errorMessage = err.localizedMessage ?: "Unable to share file")
             }
         }
     }
 
-    /**
-     * Performs 2-step Share Different Format or Save As directly from the Home card 3-dot menu,
-     * and registers the newly created file in Recent Files automatically!
-     */
     fun exportRecentFile(
         entity: RecentFileEntity,
         action: ExportAction,
         encoding: KannadaEncodingChoice,
         fileType: TargetFileType,
-        onRequestSafCreateFile: (suggestedName: String, mimeType: String) -> Unit
+        onRequestSafCreateFile: (CreateDocumentRequest) -> Unit
     ) {
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true)
             runCatching {
                 val unicodeDoc = loadUnicodeDocumentFor(entity)
-                val preparedDoc = if (fileType == TargetFileType.PDF || encoding == KannadaEncodingChoice.UNICODE) {
-                    unicodeDoc
-                } else {
-                    val legacyFont = if (encoding == KannadaEncodingChoice.BARAHA) "BRH Kannada" else "Nudi 01 e"
-                    KannadaTextConverter.prepareDocumentForLegacyExport(unicodeDoc, legacyFont)
+                val preparedDoc = if (fileType.forceUniversalUnicode || encoding == KannadaEncodingChoice.UNICODE) unicodeDoc else {
+                    KannadaTextConverter.prepareDocumentForLegacyExport(unicodeDoc, if (encoding == KannadaEncodingChoice.BARAHA) "BRH Kannada" else "Nudi 01 e")
                 }
-
-                val base = entity.displayName.substringBeforeLast('.').ifBlank { "Document" }
+                val cleanBase = storageManager.stripEncodingSuffix(entity.displayName.substringBeforeLast('.')).ifBlank { "Document" }
+                val suffix = when (fileType) {
+                    TargetFileType.HTML_ZIP -> "Web"
+                    TargetFileType.GOOGLE_DOCS -> "GoogleDocs"
+                    else -> if (fileType.forceUniversalUnicode) "Universal" else encoding.suffix
+                }
+                val formatTag = if (fileType.forceUniversalUnicode) "Universal" else encoding.shortBadge
 
                 if (action == ExportAction.SHARE_DIFFERENT) {
-                    val outFile = withContext(Dispatchers.IO) {
-                        when (fileType) {
-                            TargetFileType.PDF -> {
-                                val cachedPdf = pdfExporter.exportToPdf(preparedDoc, "${base}_${encoding.suffix}")
-                                val persistentPdf = storageManager.resolvePersistentExportFile(base, encoding.suffix, "pdf")
-                                cachedPdf.copyTo(persistentPdf, overwrite = true)
-                                persistentPdf
-                            }
-                            TargetFileType.DOCX -> {
-                                val f = storageManager.resolvePersistentExportFile(base, encoding.suffix, "docx")
-                                FileOutputStream(f).use { fos ->
-                                    docxWriter.write(preparedDoc, fos, defaultFont = encoding.defaultFontForWord)
-                                }
-                                f
-                            }
-                            TargetFileType.DOC -> {
-                                val f = storageManager.resolvePersistentExportFile(base, encoding.suffix, "doc")
-                                FileOutputStream(f).use { fos ->
-                                    rtfDocWriter.write(preparedDoc, fos, defaultFont = encoding.defaultFontForWord)
-                                }
-                                f
-                            }
+                    val (registered, shareableFile) = storageManager.saveExportedFileInKadataDocuments(
+                        cleanBase, suffix, fileType.extension, fileType.docFormat, fileType.mimeType, formatTag
+                    ) { out -> writeDocumentToStream(preparedDoc, encoding, fileType, out) }
+                    preferences.setDocumentFormatTag(registered.uriString, formatTag)
+                    _uiState.value = _uiState.value.copy(isLoading = false)
+                    if (fileType == TargetFileType.GOOGLE_DOCS) {
+                        if (!GoogleDocsShareHelper.openOrShareToGoogleDocs(appContext, shareableFile)) {
+                            _uiState.value = _uiState.value.copy(statusMessage = "Google Docs app not installed — opened Android Share sheet instead.")
                         }
+                    } else {
+                        ShareHelper.shareFile(appContext, shareableFile, fileType.mimeType, "Share ${fileType.label}")
                     }
-                    val registered = storageManager.registerExportedFile(
-                        file = outFile,
-                        displayName = outFile.name,
-                        format = fileType.docFormat,
-                        mimeType = fileType.mimeType
-                    )
-                    preferences.setDocumentFormatTag(
-                        registered.uriString,
-                        if (fileType == TargetFileType.PDF) "Universal" else encoding.shortBadge
-                    )
-                    _uiState.value = _uiState.value.copy(isLoading = false)
-                    ShareHelper.shareFile(
-                        context = appContext,
-                        file = outFile,
-                        mimeType = fileType.mimeType,
-                        chooserTitle = "Share ${encoding.labelEn} (${fileType.extension.uppercase()})"
-                    )
                 } else {
-                    val suggested = "${base}_${encoding.suffix}.${fileType.extension}"
-                    pendingSafDoc = preparedDoc
-                    pendingSafEncoding = encoding
-                    pendingSafFileType = fileType
-                    pendingSafSuggestedName = suggested
+                    val sourceUri = Uri.parse(entity.uriString)
+                    val suggested = "${cleanBase}_${suffix}.${fileType.extension}"
+                    val parentUri = FileLocationHelper.resolveParentDocumentUri(appContext, sourceUri, entity.displayName)
+                    persistPendingSafExport(preparedDoc, encoding, fileType, suggested)
                     _uiState.value = _uiState.value.copy(isLoading = false)
-                    onRequestSafCreateFile(suggested, fileType.mimeType)
+                    onRequestSafCreateFile(CreateDocumentRequest(suggested, fileType.mimeType, parentUri))
                 }
             }.onFailure { err ->
-                _uiState.value = _uiState.value.copy(
-                    isLoading = false,
-                    errorMessage = err.localizedMessage ?: "Export failed"
-                )
+                _uiState.value = _uiState.value.copy(isLoading = false, errorMessage = err.localizedMessage ?: "Export failed")
             }
         }
     }
 
     fun writePendingSafCopy(targetUri: Uri) {
-        val doc = pendingSafDoc ?: return
-        val encoding = pendingSafEncoding
-        val fileType = pendingSafFileType
-        val suggestedName = pendingSafSuggestedName
-        pendingSafDoc = null
-
         viewModelScope.launch {
+            val loaded = withContext(Dispatchers.IO) { loadPendingSafExport() } ?: return@launch
+            val (doc, encoding, fileType, suggestedName) = loaded
             _uiState.value = _uiState.value.copy(isLoading = true)
             runCatching {
-                withContext(Dispatchers.IO) {
-                    when (fileType) {
-                        TargetFileType.PDF -> {
-                            val tempPdf = pdfExporter.exportToPdf(doc, doc.fileName)
-                            appContext.contentResolver.openOutputStream(targetUri)?.use { out ->
-                                tempPdf.inputStream().use { input -> input.copyTo(out) }
-                            } ?: error("Cannot write PDF")
-                        }
-                        TargetFileType.DOCX -> {
-                            appContext.contentResolver.openOutputStream(targetUri)?.use { out ->
-                                docxWriter.write(doc, out, defaultFont = encoding.defaultFontForWord)
-                            } ?: error("Cannot write DOCX")
-                        }
-                        TargetFileType.DOC -> {
-                            appContext.contentResolver.openOutputStream(targetUri)?.use { out ->
-                                rtfDocWriter.write(doc, out, defaultFont = encoding.defaultFontForWord)
-                            } ?: error("Cannot write DOC")
-                        }
-                    }
+                withContext(Dispatchers.IO + NonCancellable) {
+                    storageManager.writeStagedToUri(targetUri) { out -> writeDocumentToStream(doc, encoding, fileType, out) }
                 }
-                val registered = storageManager.registerSafSavedUri(
-                    targetUri = targetUri,
-                    fallbackDisplayName = suggestedName,
-                    format = fileType.docFormat,
-                    mimeType = fileType.mimeType
-                )
-                preferences.setDocumentFormatTag(
-                    registered.uriString,
-                    if (fileType == TargetFileType.PDF) "Universal" else encoding.shortBadge
-                )
+                val formatTag = if (fileType.forceUniversalUnicode) "Universal" else encoding.shortBadge
+                val registered = storageManager.registerSafSavedUri(targetUri, suggestedName, fileType.docFormat, fileType.mimeType, formatTag)
+                preferences.setDocumentFormatTag(registered.uriString, formatTag)
             }.onSuccess {
-                _uiState.value = _uiState.value.copy(
-                    isLoading = false,
-                    statusMessage = "Saved ${encoding.labelEn} (.${fileType.extension}) & added to Recent Files"
-                )
+                _uiState.value = _uiState.value.copy(isLoading = false, statusMessage = "Saved ${encoding.labelEn} (.${fileType.extension}) & added to Recent Files")
             }.onFailure { err ->
-                _uiState.value = _uiState.value.copy(
-                    isLoading = false,
-                    errorMessage = err.localizedMessage ?: "Failed to save copy"
-                )
+                _uiState.value = _uiState.value.copy(isLoading = false, errorMessage = err.localizedMessage ?: "Failed to save copy")
             }
         }
     }
 
-    private suspend fun loadUnicodeDocumentFor(entity: RecentFileEntity): ParsedDocument =
-        withContext(Dispatchers.IO) {
-            val draft = draftDao.getDraft(entity.uriString)
-            if (draft != null && draft.draftIdmJson.isNotBlank()) {
-                val parsedDraft = runCatching { DocumentJson.fromJson(draft.draftIdmJson) }.getOrNull()
-                if (parsedDraft != null) return@withContext parsedDraft
-            }
-            val uri = Uri.parse(entity.uriString)
-            val parsed = parserFacade.parseDocument(appContext, uri, entity.displayName, entity.detectedFormat)
-                .getOrThrow()
-            KannadaTextConverter.normalizeDocumentToUnicode(parsed)
+    private suspend fun writeDocumentToStream(doc: ParsedDocument, encoding: KannadaEncodingChoice, fileType: TargetFileType, out: java.io.OutputStream) {
+        when (fileType) {
+            TargetFileType.PDF -> pdfExporter.exportToPdf(doc, doc.fileName).inputStream().use { it.copyTo(out) }
+            TargetFileType.DOCX, TargetFileType.GOOGLE_DOCS -> docxWriter.write(doc, out, defaultFont = if (fileType == TargetFileType.GOOGLE_DOCS) "Noto Sans Kannada" else encoding.defaultFontForWord)
+            TargetFileType.DOC, TargetFileType.RTF -> rtfDocWriter.write(doc, out, defaultFont = encoding.defaultFontForWord)
+            TargetFileType.ODT -> odtWriter.write(doc, out, defaultFont = encoding.defaultFontForWord)
+            TargetFileType.TXT -> txtWriter.write(doc, out)
+            TargetFileType.HTML_ZIP -> htmlZipWriter.writeZippedWebPage(doc, out)
+            TargetFileType.EPUB -> epubWriter.write(doc, out)
         }
+    }
+
+    private suspend fun persistPendingSafExport(doc: ParsedDocument, encoding: KannadaEncodingChoice, fileType: TargetFileType, suggestedName: String) =
+        withContext(Dispatchers.IO) {
+            pendingSafDocFile.writeText(DocumentJson.toJson(doc), Charsets.UTF_8)
+            pendingSafMetaFile.writeText(JSONObject().apply {
+                put("encoding", encoding.name); put("fileType", fileType.name); put("suggestedName", suggestedName)
+            }.toString(), Charsets.UTF_8)
+        }
+
+    private data class PendingSafPayload(val doc: ParsedDocument, val encoding: KannadaEncodingChoice, val fileType: TargetFileType, val suggestedName: String)
+
+    private fun loadPendingSafExport(): PendingSafPayload? {
+        if (!pendingSafMetaFile.exists() || !pendingSafDocFile.exists()) return null
+        return runCatching {
+            val meta = JSONObject(pendingSafMetaFile.readText(Charsets.UTF_8))
+            val doc = DocumentJson.fromJson(pendingSafDocFile.readText(Charsets.UTF_8))
+            val enc = runCatching { KannadaEncodingChoice.valueOf(meta.getString("encoding")) }.getOrDefault(KannadaEncodingChoice.NUDI)
+            val ft = runCatching { TargetFileType.valueOf(meta.getString("fileType")) }.getOrDefault(TargetFileType.DOCX)
+            val suggested = meta.optString("suggestedName", "Document.docx")
+            pendingSafMetaFile.delete(); pendingSafDocFile.delete()
+            PendingSafPayload(doc, enc, ft, suggested)
+        }.getOrNull()
+    }
+
+    private suspend fun loadUnicodeDocumentFor(entity: RecentFileEntity): ParsedDocument = withContext(Dispatchers.IO) {
+        val parsed = parserFacade.parseDocument(appContext, Uri.parse(entity.uriString), entity.displayName, entity.detectedFormat).getOrThrow()
+        KannadaTextConverter.normalizeDocumentToUnicode(parsed)
+    }
 
     private fun mimeFor(fileName: String, format: DocFormat): String {
         val ext = fileName.substringAfterLast('.', "").lowercase()
         return when {
             ext == "pdf" || format == DocFormat.PDF -> "application/pdf"
             ext == "doc" || format == DocFormat.DOC -> "application/msword"
+            ext == "odt" || format == DocFormat.ODT -> "application/vnd.oasis.opendocument.text"
             ext == "rtf" || format == DocFormat.RTF -> "application/rtf"
             ext == "txt" || format == DocFormat.TXT -> "text/plain"
+            ext == "zip" && format == DocFormat.HTML -> "application/zip"
+            ext == "html" || ext == "htm" || format == DocFormat.HTML -> "text/html"
+            ext == "epub" || format == DocFormat.EPUB -> "application/epub+zip"
             else -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         }
     }
 
-    fun showInfoMessage(message: String) {
-        _uiState.value = _uiState.value.copy(statusMessage = message)
-    }
-
-    fun clearError() {
-        _uiState.value = _uiState.value.copy(errorMessage = null)
-    }
-
-    fun clearStatus() {
-        _uiState.value = _uiState.value.copy(statusMessage = null)
-    }
-
-    fun dismissUnsupportedFormatAlert() {
-        _uiState.value = _uiState.value.copy(unsupportedFormatName = null)
-    }
+    fun showInfoMessage(message: String) { _uiState.value = _uiState.value.copy(statusMessage = message) }
+    fun clearError() { _uiState.value = _uiState.value.copy(errorMessage = null) }
+    fun clearStatus() { _uiState.value = _uiState.value.copy(statusMessage = null) }
+    fun dismissFileRejectionAlert() { _uiState.value = _uiState.value.copy(fileRejectionAlert = null) }
 
     class Factory(
         private val appContext: Context,
         private val storageManager: SafStorageManager,
+        private val recoveryVault: RecoveryVaultManager,
         private val recentFileDao: RecentFileDao,
         private val draftDao: DraftDao,
         private val preferences: AppPreferences,
         private val parserFacade: DocumentParserFacade,
         private val docxWriter: DocxWriter,
         private val rtfDocWriter: RtfDocWriter,
-        private val pdfExporter: PdfExporter
+        private val pdfExporter: PdfExporter,
+        private val odtWriter: OdtWriter = OdtWriter(),
+        private val txtWriter: TxtWriter = TxtWriter(),
+        private val htmlZipWriter: HtmlZipWriter = HtmlZipWriter(),
+        private val epubWriter: EpubWriter = EpubWriter(htmlZipWriter)
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
-        override fun <T : ViewModel> create(modelClass: Class<T>): T {
-            return HomeViewModel(
-                appContext,
-                storageManager,
-                recentFileDao,
-                draftDao,
-                preferences,
-                parserFacade,
-                docxWriter,
-                rtfDocWriter,
-                pdfExporter
-            ) as T
-        }
+        override fun <T : ViewModel> create(modelClass: Class<T>): T = HomeViewModel(
+            appContext, storageManager, recoveryVault, recentFileDao, draftDao, preferences,
+            parserFacade, docxWriter, rtfDocWriter, pdfExporter, odtWriter, txtWriter, htmlZipWriter, epubWriter
+        ) as T
     }
 }

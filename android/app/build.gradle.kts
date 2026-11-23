@@ -11,11 +11,23 @@ android {
     compileSdk = 35
 
     defaultConfig {
+        val versionFile = rootProject.file("../VERSION")
+        val resolvedVersion = if (versionFile.exists()) {
+            versionFile.readText().trim().ifBlank { "0.19.0" }
+        } else {
+            "0.19.0"
+        }
+        val verParts = resolvedVersion.split(".").mapNotNull { it.toIntOrNull() }
+        val maj = verParts.getOrElse(0) { 0 }
+        val min = verParts.getOrElse(1) { 19 }
+        val pat = verParts.getOrElse(2) { 0 }
+
         applicationId = "com.kannadadoc"
         minSdk = 28
         targetSdk = 35
-        versionCode = 172
-        versionName = "0.17.2"
+        versionCode = maj * 10000 + min * 100 + pat
+        versionName = resolvedVersion
+        resValue("string", "app_version", resolvedVersion)
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

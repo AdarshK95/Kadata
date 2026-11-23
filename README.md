@@ -1,7 +1,6 @@
 # Kadata (ಕಡತ) — Offline Kannada Document Reader, Editor & Converter
 
-[![Download APK](https://img.shields.io/badge/Download-Kadata%20APK-007ACC?style=flat&logo=android&logoColor=white)](https://github.com/AdarshK95/Kadata/releases/latest)
-[![Version](https://img.shields.io/badge/Version-0.17.2-1A4D7A?style=flat)](VERSION)
+[![Version](https://img.shields.io/badge/Version-0.20.0-1A4D7A?style=flat)](VERSION)
 [![Android](https://img.shields.io/badge/Platform-Android%208.0%2B%20(API%2028%2B)-3DDC84?style=flat&logo=android&logoColor=white)](https://developer.android.com)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.1-7F52FF?style=flat&logo=kotlin&logoColor=white)](https://kotlinlang.org)
 [![Compose](https://img.shields.io/badge/Jetpack%20Compose-Material%203-4285F4?style=flat&logo=jetpackcompose&logoColor=white)](https://developer.android.com/jetpack/compose)
@@ -10,7 +9,7 @@
 
 **Kadata (ಕಡತ)** is a 100% offline, privacy-first Android document reader, editor, and Kannada format converter built for phones and tablets.
 
-Its core design principle is **invisible, lossless conversion**: open any `.docx`, `.doc`, `.rtf`, `.txt`, or `.pdf` file from WhatsApp, Gmail, or your File Manager—whether authored in **Nudi (`ನುಡಿ`)**, **Baraha (`ಬರಹ`)**, or **Modern Universal Kannada (`ಆಧುನಿಕ ಸಾರ್ವತ್ರಿಕ ಕನ್ನಡ`)**—and Kadata automatically detects and renders it cleanly for effortless reading, editing, and PC-compatible sharing.
+Its core design principle is **invisible, lossless conversion**: open any `.docx`, `.doc`, `.odt`, `.rtf`, `.txt`, `.html` (standalone or zipped), `.epub`, `.pdf`, or **Google Docs** file from WhatsApp, Gmail, or your File Manager—whether authored in **Nudi (`ನುಡಿ`)**, **Baraha (`ಬರಹ`)**, or **Modern Universal Kannada (`ಆಧುನಿಕ ಸಾರ್ವತ್ರಿಕ ಕನ್ನಡ`)**—and Kadata automatically detects and renders it cleanly for effortless reading, editing, and PC-compatible sharing.
 
 ---
 
@@ -25,7 +24,11 @@ Its core design principle is **invisible, lossless conversion**: open any `.docx
   - **`.doc` (Word 97–2003)**: Binary OLE2 extraction powered by Apache POI HWPF.
   - **`.rtf` (Rich Text)**: Native `\fonttbl` font-table decoder with `Windows-1252` (`Cp1252`) support.
   - **`.txt` (Plain Text)**: Strict UTF-8 decoding with automatic `Cp1252` fallback for legacy Nudi text files.
-  - **`.pdf` (PDF Viewer + Text Extraction)**: Native `PdfRenderer` viewer with horizontal swipe navigation (`HorizontalPager`), smooth pinch-to-zoom (`1x–4x`), pan, double-tap zoom, and one-tap **"Edit"** text extraction via `PDFBox-Android`.
+  - **`.odt` (OpenDocument Text)**: Pure-Kotlin `OdtParser` & `OdtWriter` supporting styles, tables, lists, and legacy Kannada fonts.
+- **`.html` & Zipped Web Pages (`.zip`)**: Reads standalone HTML and Google Docs zipped web pages; exports clean zipped HTML5.
+- **`.epub` (EPUB Publications)**: Reads multi-chapter EPUB 2/3 books and exports valid EPUB 3 publications.
+- **Google Docs**: Opens virtual Google Docs via Android's Drive picker (`openTypedAssetFileDescriptor`) and exports/shares directly to Google Docs.
+- **`.pdf` (PDF Viewer + Text Extraction)**: Native `PdfRenderer` viewer with horizontal swipe navigation (`HorizontalPager`), smooth pinch-to-zoom (`1x–4x`), pan, double-tap zoom, and one-tap **"Edit"** text extraction via `PDFBox-Android`.
   - Graceful unsupported-format alerts for non-document files (e.g., `.ppt`, `.xlsx`, images).
 - **Offline Rich-Text Editor**:
   - Lightweight, zero-dependency offline HTML5 rich-text canvas running via `WebViewAssetLoader`.
@@ -74,7 +77,7 @@ Kadata uses a **Native Kotlin + Local Offline WebView** hybrid architecture so a
 ┌─────────────────────────────────────────────────────────────────────────┐
 │             LOCAL WEBVIEW ENGINE (WebViewAssetLoader — Offline)         │
 │  • Offline HTML5 Rich-Text Editor (editor.js / editor.css / index.html) │
-│  • Bidirectional Legacy ↔ Unicode Converter (kannada-converter.js)      │
+│  • Pure Display/Edit Canvas (100% Conversion Done in Kotlin Engine)     │
 │  • 100-Step Undo/Redo, Normalized Cross-Span Search, Virtual Caret      │
 │  • Bundled Fonts: Noto Sans Kannada, Nudi 01 e, BRH Kannada             │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -93,7 +96,7 @@ Kadata uses a **Native Kotlin + Local Offline WebView** hybrid architecture so a
 │   │       ├── main/
 │   │       │   ├── AndroidManifest.xml  # ACTION_VIEW filters, FileProvider & file-manager queries
 │   │       │   ├── assets/              # Offline web assets & bundled fonts
-│   │       │   │   ├── editor/          # index.html, editor.js, editor.css, kannada-converter.js
+│   │       │   │   ├── editor/          # index.html, editor.js, editor.css
 │   │       │   │   └── fonts/           # unicode/ (Noto Sans Kannada) & legacy/ (Nudi01e, BRHKannada)
 │   │       │   ├── res/                 # Adaptive icons & Tablet/Mobile WebP artwork
 │   │       │   └── java/com/kannadadoc/
@@ -105,7 +108,7 @@ Kadata uses a **Native Kotlin + Local Offline WebView** hybrid architecture so a
 │   │       └── test/                    # JUnit unit tests & test fixtures
 │   ├── build.gradle.kts                 # Root Gradle build configuration
 │   └── gradle/                          # Version catalog & Gradle wrapper
-├── VERSION                              # Single source of truth for current app version (0.17.0)
+├── VERSION                              # Single source of truth for current app version (0.20.0)
 ├── CHANGELOG.md                         # Release history & versioning policy
 ├── run.ps1                              # Interactive Windows build, install & scrcpy mirror script
 └── README.md                            # Project overview & documentation
